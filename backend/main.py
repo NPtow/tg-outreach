@@ -43,7 +43,7 @@ app = FastAPI(title="TG Outreach", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,9 +73,18 @@ def health():
 
 # Serve built React frontend — must be last
 _DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
-if os.path.isdir(_DIST):
-    app.mount("/assets", StaticFiles(directory=os.path.join(_DIST, "assets")), name="assets")
+_DIST = os.path.abspath(_DIST)
+logging.getLogger(__name__).info(f"Frontend dist path: {_DIST}, exists: {os.path.isdir(_DIST)}")
 
-    @app.get("/{full_path:path}")
-    def serve_spa(full_path: str):
-        return FileResponse(os.path.join(_DIST, "index.html"))
+if os.path.isdir(_DIST):
+    _assets = os.path.join(_DIST, "assets")
+    if os.path.isdir(_assets):
+        app.mount("/assets", StaticFiles(directory=_assets), name="assets")
+
+@app.get("/")
+@app.get("/{full_path:path}")
+def serve_spa(full_path: str = ""):
+    index = os.path.join(_DIST, "index.html")
+    if os.path.isfile(index):
+        return FileResponse(index)
+    return {"detail": "Frontend not built. Run: cd frontend && npm run build"}
