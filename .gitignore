@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.session
+sessions/
+tg_outreach.db
+.env
+frontend/node_modules/
+frontend/dist/
