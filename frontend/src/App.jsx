@@ -5,36 +5,57 @@ import Conversations from "./pages/Conversations";
 import Settings from "./pages/Settings";
 import { useWS } from "./ws";
 
-function Nav() {
-  const linkClass = ({ isActive }) =>
-    `px-4 py-2 rounded text-sm font-medium transition-colors ${
-      isActive ? "bg-blue-600 text-white" : "text-gray-300 hover:text-white hover:bg-gray-700"
-    }`;
+const NAV = [
+  { to: "/", label: "Inbox", icon: "💬", end: true },
+  { to: "/accounts", label: "Accounts", icon: "👤" },
+  { to: "/campaigns", label: "Campaigns", icon: "📢" },
+  { to: "/settings", label: "Settings", icon: "⚙️" },
+];
+
+function Sidebar() {
   return (
-    <nav className="bg-gray-900 border-b border-gray-700 px-6 py-3 flex items-center gap-2">
-      <span className="text-white font-bold text-lg mr-6">TG Outreach</span>
-      <NavLink to="/" end className={linkClass}>Conversations</NavLink>
-      <NavLink to="/accounts" className={linkClass}>Accounts</NavLink>
-      <NavLink to="/campaigns" className={linkClass}>Campaigns</NavLink>
-      <NavLink to="/settings" className={linkClass}>Settings</NavLink>
-    </nav>
+    <aside className="w-56 shrink-0 flex flex-col bg-zinc-900 border-r border-zinc-800 h-screen sticky top-0">
+      <div className="px-5 py-5 border-b border-zinc-800">
+        <div className="flex items-center gap-2.5">
+          <div className="w-7 h-7 rounded-lg bg-blue-500 flex items-center justify-center text-white text-xs font-bold">TG</div>
+          <span className="font-semibold text-zinc-100 text-sm">Outreach</span>
+        </div>
+      </div>
+      <nav className="flex-1 px-3 py-4 space-y-0.5">
+        {NAV.map(({ to, label, icon, end }) => (
+          <NavLink key={to} to={to} end={end} className={({ isActive }) =>
+            `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all ${
+              isActive
+                ? "bg-zinc-800 text-zinc-100 font-medium"
+                : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50"
+            }`
+          }>
+            <span className="text-base">{icon}</span>
+            {label}
+          </NavLink>
+        ))}
+      </nav>
+      <div className="px-4 py-4 border-t border-zinc-800">
+        <p className="text-[11px] text-zinc-600">v1.0 · Local</p>
+      </div>
+    </aside>
   );
 }
 
 export default function App() {
-  useWS(); // global WS connection
+  useWS();
   return (
     <BrowserRouter>
-      <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col">
-        <Nav />
-        <div className="flex-1 overflow-auto">
+      <div className="flex min-h-screen bg-zinc-950 text-zinc-100">
+        <Sidebar />
+        <main className="flex-1 min-w-0 overflow-auto">
           <Routes>
             <Route path="/" element={<Conversations />} />
             <Route path="/accounts" element={<Accounts />} />
             <Route path="/campaigns" element={<Campaigns />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
-        </div>
+        </main>
       </div>
     </BrowserRouter>
   );

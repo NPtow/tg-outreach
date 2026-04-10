@@ -6,4 +6,3 @@ sessions/
 tg_outreach.db
 .env
 frontend/node_modules/
-frontend/dist/
