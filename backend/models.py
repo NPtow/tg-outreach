@@ -66,6 +66,8 @@ class Campaign(Base):
     delay_min = Column(Integer, default=30)
     delay_max = Column(Integer, default=90)
     daily_limit = Column(Integer, default=20)
+    send_hour_from = Column(Integer, default=9)   # MSK hour window start (inclusive)
+    send_hour_to = Column(Integer, default=21)    # MSK hour window end (exclusive)
     status = Column(String(20), default="draft")  # draft|running|paused|done
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -78,7 +80,8 @@ class CampaignTarget(Base):
     id = Column(Integer, primary_key=True)
     campaign_id = Column(Integer, ForeignKey("campaigns.id"), nullable=False)
     username = Column(String(100), nullable=False)
-    status = Column(String(20), default="pending")  # pending|sent|failed
+    display_name = Column(String(100), nullable=True)  # custom name for {first_name}
+    status = Column(String(20), default="pending")  # pending|sent|failed|skipped
     sent_at = Column(DateTime, nullable=True)
     error = Column(Text, nullable=True)
 

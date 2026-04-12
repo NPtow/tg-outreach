@@ -24,7 +24,11 @@ function Modal({ title, onClose, children }) {
 }
 
 function CreateModal({ accounts, onClose, onCreated }) {
-  const [form, setForm] = useState({ name: "", account_id: "", delay_min: 30, delay_max: 90, daily_limit: 20 });
+  const [form, setForm] = useState({
+    name: "", account_id: "",
+    delay_min: 30, delay_max: 90, daily_limit: 20,
+    send_hour_from: 9, send_hour_to: 21,
+  });
   const [messagesText, setMessagesText] = useState("");
   const [targetsText, setTargetsText] = useState("");
   const [loading, setLoading] = useState(false);
@@ -40,11 +44,21 @@ function CreateModal({ accounts, onClose, onCreated }) {
     if (!targets.length) { setError("Добавь хотя бы один контакт"); return; }
     setLoading(true); setError("");
     try {
-      await api.createCampaign({ ...form, account_id: Number(form.account_id), messages, targets });
+      await api.createCampaign({
+        ...form,
+        account_id: Number(form.account_id),
+        messages,
+        targets,
+      });
       onCreated();
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };
+
+  // Count targets respecting csv format
+  const targetCount = targetsText.split("\n").filter(t => t.trim()).length;
+  const hasPersonalization = messagesText.includes("{first_name}");
+  const csvCount = targetsText.split("\n").filter(t => t.includes(",") && t.trim()).length;
 
   return (
     <Modal title="Новая кампания" onClose={onClose}>
@@ -70,21 +84,23 @@ function CreateModal({ accounts, onClose, onCreated }) {
             Варианты сообщений <span className="text-zinc-600 font-normal">— разделяй через ---</span>
           </label>
           <textarea rows={5} className={`${inputCls} resize-y`}
-            placeholder={"Привет! Хотел бы обсудить сотрудничество...\n---\nДобрый день! Увидел твой профиль и думаю..."}
+            placeholder={"Привет, {first_name}! Хотел бы обсудить сотрудничество...\n---\nДобрый день! Увидел твой профиль и думаю..."}
             value={messagesText} onChange={e => setMessagesText(e.target.value)} />
           <p className="text-[11px] text-zinc-600 mt-1">
-            {messagesText.split("---").filter(m => m.trim()).length} вариант(а) сообщений
+            {messagesText.split("---").filter(m => m.trim()).length} вариант(а)
+            {hasPersonalization && <span className="text-blue-400 ml-2">· использует {"{first_name}"}</span>}
           </p>
         </div>
         <div>
           <label className="text-xs font-medium text-zinc-400 block mb-1.5">
-            Контакты <span className="text-zinc-600 font-normal">— по одному на строку, без @</span>
+            Контакты <span className="text-zinc-600 font-normal">— username или username,Имя</span>
           </label>
           <textarea rows={5} className={`${inputCls} resize-y font-mono text-xs`}
-            placeholder={"username1\nusername2\nusername3"}
+            placeholder={"username1\nusername2,Иван\nusername3,Мария"}
             value={targetsText} onChange={e => setTargetsText(e.target.value)} />
           <p className="text-[11px] text-zinc-600 mt-1">
-            {targetsText.split("\n").filter(t => t.trim()).length} контактов
+            {targetCount} контактов
+            {csvCount > 0 && <span className="text-blue-400 ml-2">· {csvCount} с именем</span>}
           </p>
         </div>
         <div className="grid grid-cols-3 gap-3 pt-1">
@@ -102,6 +118,26 @@ function CreateModal({ accounts, onClose, onCreated }) {
               </div>
             </div>
           ))}
+        </div>
+        <div>
+          <label className="text-xs font-medium text-zinc-400 block mb-1.5">
+            Окно отправки <span className="text-zinc-600 font-normal">— по Москве (UTC+3)</span>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { k: "send_hour_from", label: "С (час)" },
+              { k: "send_hour_to", label: "До (час)" },
+            ].map(({ k, label }) => (
+              <div key={k}>
+                <label className="text-xs text-zinc-500 block mb-1">{label}</label>
+                <input type="number" min={0} max={23} className={inputCls} value={form[k]}
+                  onChange={e => setForm({...form, [k]: Number(e.target.value)})} />
+              </div>
+            ))}
+          </div>
+          <p className="text-[11px] text-zinc-600 mt-1">
+            Сообщения отправляются только с {form.send_hour_from}:00 до {form.send_hour_to}:00 MSK
+          </p>
         </div>
       </div>
       {error && <p className="text-red-400 text-xs mt-4 bg-red-500/10 px-3 py-2 rounded-lg">{error}</p>}
@@ -124,6 +160,7 @@ export default function Campaigns() {
 
   const handleStart = async id => { await api.startCampaign(id).catch(e => alert(e.message)); load(); };
   const handlePause = async id => { await api.pauseCampaign(id); load(); };
+  const handleRetry = async id => { await api.retryFailed(id).catch(e => alert(e.message)); load(); };
   const handleDelete = async id => { if (!confirm("Удалить кампанию?")) return; await api.deleteCampaign(id); load(); };
 
   return (
@@ -155,7 +192,7 @@ export default function Campaigns() {
                     <div className="min-w-0">
                       <p className="font-medium text-zinc-100 text-sm">{c.name}</p>
                       <p className="text-xs text-zinc-500 mt-0.5">
-                        задержка {c.delay_min}–{c.delay_max}с · лимит {c.daily_limit}/день
+                        задержка {c.delay_min}–{c.delay_max}с · лимит {c.daily_limit}/день · {c.send_hour_from}:00–{c.send_hour_to}:00 MSK
                       </p>
                     </div>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 ${st.cls}`}>{st.label}</span>
@@ -173,6 +210,12 @@ export default function Campaigns() {
                         ⏸ Пауза
                       </button>
                     )}
+                    {c.failed > 0 && !c.is_running && (
+                      <button onClick={() => handleRetry(c.id)}
+                        className="text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-300 px-3 py-1.5 rounded-lg font-medium transition-colors">
+                        ↺ Retry ({c.failed})
+                      </button>
+                    )}
                     <button onClick={() => handleDelete(c.id)} className="text-xs text-zinc-600 hover:text-red-400 transition-colors px-2 py-1.5">
                       Удалить
                     </button>
@@ -183,6 +226,7 @@ export default function Campaigns() {
                     <span className="text-zinc-100 font-medium">{c.sent}</span>/{c.total} отправлено
                   </span>
                   {c.failed > 0 && <span className="text-xs text-red-400">{c.failed} ошибок</span>}
+                  {c.skipped > 0 && <span className="text-xs text-zinc-600">{c.skipped} пропущено</span>}
                   <span className="text-xs text-zinc-600 ml-auto">{pct}%</span>
                 </div>
                 <div className="w-full bg-zinc-800 rounded-full h-1">

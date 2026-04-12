@@ -44,6 +44,7 @@ export const api = {
   createCampaign: (data) => req("POST", "/api/campaigns/", data),
   startCampaign: (id) => req("POST", `/api/campaigns/${id}/start`),
   pauseCampaign: (id) => req("POST", `/api/campaigns/${id}/pause`),
+  retryFailed: (id) => req("POST", `/api/campaigns/${id}/retry-failed`),
   deleteCampaign: (id) => req("DELETE", `/api/campaigns/${id}`),
 
   // Settings

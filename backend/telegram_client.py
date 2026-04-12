@@ -6,10 +6,17 @@ import json
 import logging
 import os
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict
 
 from telethon import TelegramClient, events
+from telethon.errors import (
+    FloodWaitError,
+    PeerFloodError,
+    UserPrivacyRestrictedError,
+    UsernameNotOccupiedError,
+    UsernameInvalidError,
+)
 from telethon.sessions import StringSession
 from telethon.tl.types import User
 
@@ -29,6 +36,9 @@ SESSIONS_DIR = "sessions"
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 _ws_broadcast = None
+
+# Moscow offset — UTC+3
+_MSK_OFFSET = timedelta(hours=3)
 
 
 def set_ws_broadcast(fn):
@@ -281,8 +291,27 @@ async def start_all_accounts():
                 if ok:
                     acc.is_active = True
                     db.commit()
+        # Resume campaigns that were running before restart
+        await resume_running_campaigns(db)
     finally:
         db.close()
+
+
+async def resume_running_campaigns(db=None):
+    """Re-launch worker tasks for campaigns with status='running' after a restart."""
+    close_db = db is None
+    if close_db:
+        db = SessionLocal()
+    try:
+        running = db.query(Campaign).filter(Campaign.status == "running").all()
+        for c in running:
+            if c.id not in _campaign_tasks:
+                logger.info(f"Resuming campaign {c.id} ({c.name}) after restart")
+                task = asyncio.create_task(_campaign_worker(c.id))
+                _campaign_tasks[c.id] = task
+    finally:
+        if close_db:
+            db.close()
 
 
 # ── Campaign worker ──────────────────────────────────────────────
@@ -312,6 +341,21 @@ def campaign_is_running(campaign_id: int) -> bool:
     return campaign_id in _campaign_tasks
 
 
+def _seconds_until_window_open(hour_from: int, hour_to: int) -> int:
+    """Return seconds to sleep until the send window opens (MSK = UTC+3)."""
+    now_msk = datetime.utcnow() + _MSK_OFFSET
+    current_hour = now_msk.hour
+    if hour_from <= current_hour < hour_to:
+        return 0  # already in window
+    # Calculate next window open time
+    if current_hour < hour_from:
+        target = now_msk.replace(hour=hour_from, minute=0, second=0, microsecond=0)
+    else:
+        # past hour_to — wait until tomorrow
+        target = (now_msk + timedelta(days=1)).replace(hour=hour_from, minute=0, second=0, microsecond=0)
+    return max(0, int((target - now_msk).total_seconds()))
+
+
 async def _campaign_worker(campaign_id: int):
     logger.info(f"Campaign {campaign_id} worker started")
     try:
@@ -322,7 +366,17 @@ async def _campaign_worker(campaign_id: int):
                 if not campaign or campaign.status != "running":
                     break
 
-                # Check daily limit
+                # ── Time window check (MSK) ──
+                wait_secs = _seconds_until_window_open(
+                    campaign.send_hour_from, campaign.send_hour_to
+                )
+                if wait_secs > 0:
+                    logger.info(f"Campaign {campaign_id}: outside send window, sleeping {wait_secs}s")
+                    db.close()
+                    await asyncio.sleep(wait_secs)
+                    continue
+
+                # ── Daily limit check ──
                 today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
                 sent_today = db.query(CampaignTarget).filter(
                     CampaignTarget.campaign_id == campaign_id,
@@ -336,7 +390,7 @@ async def _campaign_worker(campaign_id: int):
                     await asyncio.sleep(3600)
                     continue
 
-                # Next pending target
+                # ── Next pending target ──
                 target = db.query(CampaignTarget).filter(
                     CampaignTarget.campaign_id == campaign_id,
                     CampaignTarget.status == "pending",
@@ -348,6 +402,22 @@ async def _campaign_worker(campaign_id: int):
                     logger.info(f"Campaign {campaign_id}: all targets done")
                     break
 
+                # ── Deduplication: skip if already sent from this account ──
+                already_sent = db.query(CampaignTarget).join(
+                    Campaign, CampaignTarget.campaign_id == Campaign.id
+                ).filter(
+                    CampaignTarget.username == target.username,
+                    Campaign.account_id == campaign.account_id,
+                    CampaignTarget.status == "sent",
+                    CampaignTarget.campaign_id != campaign_id,
+                ).first()
+
+                if already_sent:
+                    target.status = "skipped"
+                    db.commit()
+                    logger.info(f"Campaign {campaign_id}: skipped {target.username} (already sent from this account)")
+                    continue
+
                 client = _clients.get(campaign.account_id)
                 if not client:
                     logger.warning(f"Campaign {campaign_id}: account not connected, retrying in 60s")
@@ -358,11 +428,36 @@ async def _campaign_worker(campaign_id: int):
                 messages = json.loads(campaign.messages)
                 text = random.choice(messages)
 
+                # ── Personalization: replace {first_name} ──
+                first_name = target.display_name or ""
+                text = text.replace("{first_name}", first_name).strip()
+                # Clean up double spaces left after removing empty placeholder
+                while "  " in text:
+                    text = text.replace("  ", " ")
+
                 try:
                     await client.send_message(target.username, text)
                     target.status = "sent"
                     target.sent_at = datetime.utcnow()
                     logger.info(f"Campaign {campaign_id}: sent to {target.username}")
+                except FloodWaitError as e:
+                    # Telegram says wait — pause the whole worker temporarily
+                    wait = e.seconds + 5
+                    logger.warning(f"Campaign {campaign_id}: FloodWait {e.seconds}s, sleeping {wait}s")
+                    db.commit()
+                    db.close()
+                    await asyncio.sleep(wait)
+                    continue
+                except PeerFloodError:
+                    # Account is heavily rate-limited — pause campaign to protect it
+                    logger.error(f"Campaign {campaign_id}: PeerFloodError — pausing campaign to protect account")
+                    campaign.status = "paused"
+                    db.commit()
+                    break
+                except (UserPrivacyRestrictedError, UsernameNotOccupiedError, UsernameInvalidError) as e:
+                    target.status = "failed"
+                    target.error = str(e)
+                    logger.warning(f"Campaign {campaign_id}: permanent error for {target.username}: {e}")
                 except Exception as e:
                     target.status = "failed"
                     target.error = str(e)
@@ -390,16 +485,11 @@ async def _campaign_worker(campaign_id: int):
             finally:
                 db.close()
 
-            delay = random.randint(
-                db.query(Campaign).filter(Campaign.id == campaign_id).first().delay_min if False else 30,
-                90
-            )
-            # Re-fetch delay from DB
+            # ── Inter-message delay ──
             db2 = SessionLocal()
             try:
                 c = db2.query(Campaign).filter(Campaign.id == campaign_id).first()
-                if c:
-                    delay = random.randint(c.delay_min, c.delay_max)
+                delay = random.randint(c.delay_min, c.delay_max) if c else 30
             finally:
                 db2.close()
 

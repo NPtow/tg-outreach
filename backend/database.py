@@ -39,6 +39,9 @@ def init_db():
         ("accounts", "proxy_type TEXT"),
         ("accounts", "proxy_user TEXT"),
         ("accounts", "proxy_pass TEXT"),
+        ("campaigns", "send_hour_from INTEGER DEFAULT 9"),
+        ("campaigns", "send_hour_to INTEGER DEFAULT 21"),
+        ("campaign_targets", "display_name TEXT"),
     ]
     with engine.connect() as conn:
         for table, col_def in new_cols:

@@ -1,5 +1,5 @@
 import json
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -15,11 +15,13 @@ router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 class CampaignCreate(BaseModel):
     name: str
     account_id: int
-    messages: List[str]  # list of variants
-    targets: List[str]   # list of usernames
+    messages: List[str]       # list of message variants
+    targets: List[str]        # list of "username" or "username,name" lines
     delay_min: int = 30
     delay_max: int = 90
     daily_limit: int = 20
+    send_hour_from: int = 9   # MSK hour (inclusive)
+    send_hour_to: int = 21    # MSK hour (exclusive)
 
 
 @router.get("/")
@@ -34,6 +36,9 @@ def list_campaigns(db: Session = Depends(get_db)):
         failed = db.query(CampaignTarget).filter(
             CampaignTarget.campaign_id == c.id, CampaignTarget.status == "failed"
         ).count()
+        skipped = db.query(CampaignTarget).filter(
+            CampaignTarget.campaign_id == c.id, CampaignTarget.status == "skipped"
+        ).count()
         result.append({
             "id": c.id,
             "name": c.name,
@@ -43,9 +48,12 @@ def list_campaigns(db: Session = Depends(get_db)):
             "delay_min": c.delay_min,
             "delay_max": c.delay_max,
             "daily_limit": c.daily_limit,
+            "send_hour_from": c.send_hour_from,
+            "send_hour_to": c.send_hour_to,
             "total": total,
             "sent": sent,
             "failed": failed,
+            "skipped": skipped,
             "created_at": c.created_at,
         })
     return result
@@ -65,15 +73,27 @@ def create_campaign(data: CampaignCreate, db: Session = Depends(get_db)):
         delay_min=data.delay_min,
         delay_max=data.delay_max,
         daily_limit=data.daily_limit,
+        send_hour_from=data.send_hour_from,
+        send_hour_to=data.send_hour_to,
         status="draft",
     )
     db.add(c)
     db.flush()
 
-    for username in data.targets:
-        u = username.strip().lstrip("@")
-        if u:
-            db.add(CampaignTarget(campaign_id=c.id, username=u))
+    for raw in data.targets:
+        raw = raw.strip()
+        if not raw:
+            continue
+        # Support "username,Name" format for personalization
+        if "," in raw:
+            parts = raw.split(",", 1)
+            username = parts[0].strip().lstrip("@")
+            display_name = parts[1].strip() or None
+        else:
+            username = raw.lstrip("@")
+            display_name = None
+        if username:
+            db.add(CampaignTarget(campaign_id=c.id, username=username, display_name=display_name))
 
     db.commit()
     db.refresh(c)
@@ -100,6 +120,23 @@ async def pause_campaign(campaign_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Campaign not found")
     await tg.stop_campaign(campaign_id)
     return {"ok": True}
+
+
+@router.post("/{campaign_id}/retry-failed")
+def retry_failed(campaign_id: int, db: Session = Depends(get_db)):
+    """Reset all failed targets back to pending so they get retried."""
+    c = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not c:
+        raise HTTPException(404, "Campaign not found")
+    updated = db.query(CampaignTarget).filter(
+        CampaignTarget.campaign_id == campaign_id,
+        CampaignTarget.status == "failed",
+    ).update({"status": "pending", "error": None})
+    # If campaign was done, move back to paused so user can restart
+    if c.status == "done" and updated > 0:
+        c.status = "paused"
+    db.commit()
+    return {"ok": True, "retried": updated}
 
 
 @router.delete("/{campaign_id}")
