@@ -28,10 +28,8 @@ def init_db():
     from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact  # noqa
     Base.metadata.create_all(bind=engine)
 
-    if not DATABASE_URL.startswith("sqlite"):
-        return  # PostgreSQL handles schema via create_all
-
-    # SQLite: add new columns if missing (safe to re-run, errors are swallowed)
+    # Add new columns to existing tables (safe to re-run — errors for existing columns are swallowed)
+    # Works for both SQLite and PostgreSQL.
     new_cols = [
         # accounts
         ("accounts", "session_string TEXT"),
@@ -65,4 +63,4 @@ def init_db():
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_def}"))
                 conn.commit()
             except Exception:
-                pass  # column already exists
+                conn.rollback()  # PostgreSQL requires rollback after error before next statement
