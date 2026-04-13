@@ -47,6 +47,7 @@ def list_accounts(db: Session = Depends(get_db)):
             "app_id": a.app_id,
             "is_active": tg.is_running(a.id),
             "auto_reply": a.auto_reply,
+            "needs_reauth": bool(getattr(a, "needs_reauth", False)),
             "prompt_template_id": a.prompt_template_id,
             "created_at": a.created_at,
         }
@@ -92,6 +93,22 @@ async def verify_code(data: VerifyCodeRequest, db: Session = Depends(get_db)):
             acc.is_active = True
             db.commit()
     return result
+
+
+@router.post("/{account_id}/reconnect")
+async def reconnect_account(account_id: int, db: Session = Depends(get_db)):
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    acc.needs_reauth = False
+    db.commit()
+    ok = await tg.start_client(acc)
+    if ok:
+        acc.is_active = True
+        db.commit()
+        return {"ok": True}
+    needs_reauth = bool(getattr(acc, "needs_reauth", False))
+    return {"ok": False, "needs_reauth": needs_reauth, "error": "Session expired — re-authorization required" if needs_reauth else "Connection failed"}
 
 
 @router.post("/{account_id}/toggle-reply")

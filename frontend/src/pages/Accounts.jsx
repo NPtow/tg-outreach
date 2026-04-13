@@ -161,11 +161,75 @@ function ImportTdataModal({ onClose, onAdded }) {
   );
 }
 
+function ReauthModal({ account, onClose, onDone }) {
+  const [step, setStep] = useState("code"); // code | done
+  const [phoneCodeHash, setPhoneCodeHash] = useState("");
+  const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleSendCode = async () => {
+    setError(""); setLoading(true);
+    try {
+      const result = await api.sendCode(account.id);
+      if (result.ok) setPhoneCodeHash(result.phone_code_hash);
+      else setError(result.error || "Ошибка отправки кода");
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const handleVerify = async () => {
+    setError(""); setLoading(true);
+    try {
+      const result = await api.verifyCode({ account_id: account.id, phone_code_hash: phoneCodeHash, code, password });
+      if (result.ok) { setStep("done"); onDone(); }
+      else setError(result.error || "Неверный код");
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <Modal title="Повторная авторизация" onClose={onClose}>
+      {step === "done" ? (
+        <div className="text-center py-4">
+          <div className="text-4xl mb-3">✅</div>
+          <p className="text-zinc-300 text-sm">Аккаунт переподключён</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-xs text-zinc-400 bg-zinc-800/50 rounded-lg px-3 py-2">
+            Аккаунт <span className="text-zinc-200 font-medium">{account.name}</span> ({account.phone}) — сессия истекла. Авторизуйся заново без удаления аккаунта.
+          </p>
+          {!phoneCodeHash ? (
+            <p className="text-sm text-zinc-400">Нажми кнопку ниже — код придёт в Telegram</p>
+          ) : (
+            <>
+              <p className="text-sm text-zinc-400">Код отправлен на <span className="text-zinc-200 font-medium">{account.phone}</span></p>
+              <Field label="Код из Telegram" placeholder="12345" value={code} onChange={e => setCode(e.target.value)} />
+              <Field label="2FA пароль (если есть)" type="password" placeholder="••••••" value={password} onChange={e => setPassword(e.target.value)} />
+            </>
+          )}
+          {error && <p className="text-red-400 text-xs bg-red-500/10 px-3 py-2 rounded-lg">{error}</p>}
+          <div className="flex gap-2 mt-4">
+            {!phoneCodeHash
+              ? <button onClick={handleSendCode} disabled={loading} className="btn-primary">{loading ? "Отправляю..." : "Отправить код"}</button>
+              : <button onClick={handleVerify} disabled={loading} className="btn-primary">{loading ? "Проверяю..." : "Подтвердить"}</button>}
+            <button onClick={onClose} className="btn-ghost">Отмена</button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 export default function Accounts() {
   const [accounts, setAccounts] = useState([]);
   const [prompts, setPrompts] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [showTdata, setShowTdata] = useState(false);
+  const [reauthAccount, setReauthAccount] = useState(null);
+  const [reconnecting, setReconnecting] = useState({});
 
   const load = () => api.getAccounts().then(setAccounts);
 
@@ -177,6 +241,16 @@ export default function Accounts() {
   const handleSetPrompt = async (accId, promptId) => {
     await api.setPrompt(accId, promptId ? Number(promptId) : null);
     load();
+  };
+
+  const handleReconnect = async (accId) => {
+    setReconnecting(r => ({ ...r, [accId]: true }));
+    try {
+      await api.reconnectAccount(accId);
+      load();
+    } finally {
+      setReconnecting(r => ({ ...r, [accId]: false }));
+    }
   };
 
   return (
@@ -212,10 +286,27 @@ export default function Accounts() {
                       <p className="text-xs text-zinc-500">{acc.phone}</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <span className={`text-xs px-2 py-1 rounded-full font-medium ${acc.is_active ? "bg-emerald-500/10 text-emerald-400" : "bg-zinc-800 text-zinc-500"}`}>
-                      {acc.is_active ? "Online" : "Offline"}
-                    </span>
+                  <div className="flex items-center gap-2 flex-wrap justify-end">
+                    {acc.needs_reauth ? (
+                      <span className="text-xs px-2 py-1 rounded-full font-medium bg-amber-500/10 text-amber-400">
+                        Нужна авторизация
+                      </span>
+                    ) : (
+                      <span className={`text-xs px-2 py-1 rounded-full font-medium ${acc.is_active ? "bg-emerald-500/10 text-emerald-400" : "bg-zinc-800 text-zinc-500"}`}>
+                        {acc.is_active ? "Online" : "Offline"}
+                      </span>
+                    )}
+                    {acc.needs_reauth ? (
+                      <button onClick={() => setReauthAccount(acc)}
+                        className="text-xs bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded-lg font-medium transition-colors">
+                        Авторизовать
+                      </button>
+                    ) : !acc.is_active ? (
+                      <button onClick={() => handleReconnect(acc.id)} disabled={reconnecting[acc.id]}
+                        className="text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-300 px-3 py-1.5 rounded-lg font-medium transition-colors disabled:opacity-50">
+                        {reconnecting[acc.id] ? "Подключаю..." : "↺ Переподключить"}
+                      </button>
+                    ) : null}
                     <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer select-none">
                       <div className={`relative w-8 h-4 rounded-full transition-colors ${acc.auto_reply ? "bg-blue-600" : "bg-zinc-700"}`}
                         onClick={() => api.toggleReply(acc.id).then(load)}>
@@ -252,6 +343,13 @@ export default function Accounts() {
 
       {showModal && <AddAccountModal onClose={() => { setShowModal(false); load(); }} onAdded={load} />}
       {showTdata && <ImportTdataModal onClose={() => { setShowTdata(false); load(); }} onAdded={load} />}
+      {reauthAccount && (
+        <ReauthModal
+          account={reauthAccount}
+          onClose={() => setReauthAccount(null)}
+          onDone={() => { setReauthAccount(null); load(); }}
+        />
+      )}
     </div>
   );
 }

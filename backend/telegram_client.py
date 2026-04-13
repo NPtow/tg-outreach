@@ -347,6 +347,17 @@ async def _handle_message(account_id: int, event):
         db.close()
 
 
+async def _set_needs_reauth(account_id: int, value: bool):
+    db = SessionLocal()
+    try:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        if acc:
+            acc.needs_reauth = value
+            db.commit()
+    finally:
+        db.close()
+
+
 async def start_client(account: Account) -> bool:
     if account.id in _clients:
         return True
@@ -355,10 +366,12 @@ async def start_client(account: Account) -> bool:
     try:
         await client.connect()
         if not await client.is_user_authorized():
-            logger.warning(f"Account {account.id} not authorized")
+            logger.warning(f"Account {account.id} session expired — needs re-auth")
             await client.disconnect()
+            await _set_needs_reauth(account.id, True)
             return False
 
+        await _set_needs_reauth(account.id, False)
         await _save_session_string(account.id, client)
 
         @client.on(events.NewMessage())
@@ -391,6 +404,44 @@ async def _run_client(client: TelegramClient, account_id: int):
             if acc:
                 acc.is_active = False
                 db.commit()
+        finally:
+            db.close()
+    # Network blip — try to reconnect once after 15s (supervisor will handle the rest)
+    logger.info(f"Client {account_id} dropped, scheduling reconnect in 15s")
+    await asyncio.sleep(15)
+    db = SessionLocal()
+    try:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        if acc and not getattr(acc, "needs_reauth", False) and account_id not in _clients:
+            logger.info(f"Auto-reconnecting account {account_id}")
+            ok = await start_client(acc)
+            if ok:
+                acc.is_active = True
+                db.commit()
+    except Exception as e:
+        logger.error(f"Auto-reconnect failed for {account_id}: {e}")
+    finally:
+        db.close()
+
+
+async def _supervise_accounts():
+    """Background supervisor: restarts dropped clients every 60s."""
+    while True:
+        await asyncio.sleep(60)
+        db = SessionLocal()
+        try:
+            accounts = db.query(Account).all()
+            for acc in accounts:
+                needs_reauth = getattr(acc, "needs_reauth", False)
+                has_session = acc.session_string or os.path.exists(_session_path(acc.id) + ".session")
+                if has_session and not needs_reauth and acc.id not in _clients:
+                    logger.info(f"Supervisor: reconnecting account {acc.id} ({acc.phone})")
+                    ok = await start_client(acc)
+                    if ok:
+                        acc.is_active = True
+                        db.commit()
+        except Exception as e:
+            logger.error(f"Supervisor error: {e}")
         finally:
             db.close()
 
@@ -472,6 +523,8 @@ async def start_all_accounts():
         await resume_running_campaigns(db)
     finally:
         db.close()
+    # Start background supervisor for 24/7 uptime
+    asyncio.create_task(_supervise_accounts())
 
 
 async def resume_running_campaigns(db=None):

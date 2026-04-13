@@ -33,6 +33,7 @@ def init_db():
     new_cols = [
         # accounts
         ("accounts", "session_string TEXT"),
+        ("accounts", "needs_reauth INTEGER DEFAULT 0"),
         ("accounts", "proxy_host TEXT"),
         ("accounts", "proxy_port INTEGER"),
         ("accounts", "proxy_type TEXT"),
