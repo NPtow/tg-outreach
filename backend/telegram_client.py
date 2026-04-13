@@ -374,15 +374,17 @@ async def start_client(account: Account) -> bool:
         await _set_needs_reauth(account.id, False)
         await _save_session_string(account.id, client)
 
+        acc_id = int(account.id)  # capture as plain int — account object may be detached later
+
         @client.on(events.NewMessage())
         async def handler(event):
-            await _handle_message(account.id, event)
+            await _handle_message(acc_id, event)
 
-        _clients[account.id] = client
-        task = asyncio.create_task(_run_client(client, account.id))
-        _tasks[account.id] = task
+        _clients[acc_id] = client
+        task = asyncio.create_task(_run_client(client, acc_id))
+        _tasks[acc_id] = task
 
-        logger.info(f"Started client for account {account.id} ({account.phone})")
+        logger.info(f"Started client for account {acc_id} ({account.phone})")
         return True
     except Exception as e:
         logger.error(f"Failed to start client {account.id}: {e}")
