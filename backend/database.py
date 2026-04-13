@@ -25,7 +25,7 @@ def get_db():
 
 
 def init_db():
-    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget  # noqa
+    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact  # noqa
     Base.metadata.create_all(bind=engine)
 
     if not DATABASE_URL.startswith("sqlite"):
