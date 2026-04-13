@@ -122,7 +122,7 @@ def toggle_reply(account_id: int, db: Session = Depends(get_db)):
 
 
 class SetPromptRequest(BaseModel):
-    prompt_template_id: int | None
+    prompt_template_id: Optional[int]
 
 
 @router.post("/{account_id}/set-prompt")

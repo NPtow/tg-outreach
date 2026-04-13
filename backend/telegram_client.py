@@ -7,7 +7,7 @@ import logging
 import os
 import random
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, Optional
 
 from telethon import TelegramClient, events
 from telethon.errors import (
@@ -81,7 +81,7 @@ async def _save_session_string(account_id: int, client: TelegramClient):
         db.close()
 
 
-def _resolve_prompt(settings: Settings, account: Account, campaign: Campaign | None) -> str:
+def _resolve_prompt(settings: Settings, account: Account, campaign: Optional[Campaign]) -> str:
     """
     Resolve the active system prompt with priority:
     campaign.prompt_template > account.prompt_template > settings.system_prompt
@@ -93,7 +93,7 @@ def _resolve_prompt(settings: Settings, account: Account, campaign: Campaign | N
     return settings.system_prompt if settings else ""
 
 
-def _is_in_dnc(db, username: str | None, tg_user_id: str | None) -> bool:
+def _is_in_dnc(db, username: Optional[str], tg_user_id: Optional[str]) -> bool:
     q = db.query(DoNotContact)
     if username:
         entry = q.filter(DoNotContact.username == username).first()
@@ -106,7 +106,7 @@ def _is_in_dnc(db, username: str | None, tg_user_id: str | None) -> bool:
     return False
 
 
-def _add_to_dnc(db, username: str | None, tg_user_id: str | None, reason: str):
+def _add_to_dnc(db, username: Optional[str], tg_user_id: Optional[str], reason: str):
     if not username and not tg_user_id:
         return
     existing = _is_in_dnc(db, username, tg_user_id)
@@ -115,7 +115,7 @@ def _add_to_dnc(db, username: str | None, tg_user_id: str | None, reason: str):
         db.commit()
 
 
-def _find_source_campaign(db, account_id: int, username: str | None) -> int | None:
+def _find_source_campaign(db, account_id: int, username: Optional[str]) -> Optional[int]:
     """Find campaign that sent a message to this username from this account."""
     if not username:
         return None
