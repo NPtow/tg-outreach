@@ -23,9 +23,87 @@ function Modal({ title, onClose, children }) {
   );
 }
 
+// ── Contact picker modal ─────────────────────────────────────────
+function ContactPicker({ onClose, onSelect }) {
+  const [contacts, setContacts] = useState([]);
+  const [search, setSearch] = useState("");
+  const [picked, setPicked] = useState(new Set());
+
+  useEffect(() => { api.getContacts().then(setContacts); }, []);
+
+  const filtered = contacts.filter(c => {
+    if (!search) return true;
+    const s = search.toLowerCase();
+    return (c.username + (c.display_name || "") + (c.company || "") + (c.role || "")).toLowerCase().includes(s);
+  });
+
+  const togglePick = (id) => setPicked(prev => {
+    const n = new Set(prev);
+    if (n.has(id)) n.delete(id); else n.add(id);
+    return n;
+  });
+
+  const handleAdd = () => {
+    const chosen = contacts.filter(c => picked.has(c.id));
+    onSelect(chosen);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+      <div className="bg-zinc-900 rounded-2xl w-full max-w-xl border border-zinc-700/50 shadow-2xl max-h-[80vh] flex flex-col">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 shrink-0">
+          <h2 className="text-base font-semibold text-zinc-100">Выбрать контакты из базы</h2>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200 text-xl w-7 h-7 flex items-center justify-center rounded-lg hover:bg-zinc-800 transition-colors">×</button>
+        </div>
+        <div className="px-4 py-3 border-b border-zinc-800 shrink-0">
+          <input
+            className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500"
+            placeholder="Поиск..."
+            value={search} onChange={e => setSearch(e.target.value)}
+          />
+        </div>
+        <div className="flex-1 overflow-y-auto divide-y divide-zinc-800/50">
+          {filtered.length === 0 ? (
+            <div className="p-8 text-center text-zinc-500 text-sm">
+              {contacts.length === 0 ? "База контактов пуста — сначала добавь контакты в разделе Contacts" : "Ничего не найдено"}
+            </div>
+          ) : filtered.map(c => (
+            <div key={c.id}
+              className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-zinc-800/40 transition-colors ${picked.has(c.id) ? "bg-zinc-800/30" : ""}`}
+              onClick={() => togglePick(c.id)}>
+              <input type="checkbox" className="accent-blue-500 shrink-0" checked={picked.has(c.id)} readOnly />
+              <div className="min-w-0">
+                <span className="text-sm text-blue-400 font-mono">@{c.username}</span>
+                {c.display_name && <span className="text-xs text-zinc-300 ml-2">{c.display_name}</span>}
+                {(c.company || c.role) && (
+                  <span className="text-xs text-zinc-600 ml-2">
+                    {[c.company, c.role].filter(Boolean).join(" · ")}
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="px-4 py-3 border-t border-zinc-800 flex items-center justify-between shrink-0">
+          <span className="text-xs text-zinc-500">{picked.size} выбрано</span>
+          <div className="flex gap-2">
+            <button onClick={onClose} className="btn-ghost text-sm">Отмена</button>
+            <button onClick={handleAdd} disabled={picked.size === 0} className="btn-primary text-sm">
+              Добавить {picked.size > 0 ? `(${picked.size})` : ""}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Create Campaign modal ────────────────────────────────────────
 function CreateModal({ accounts, prompts, onClose, onCreated }) {
   const [form, setForm] = useState({
-    name: "", account_id: "",
+    name: "",
+    account_ids: [],
     delay_min: 30, delay_max: 90, daily_limit: 20,
     send_hour_from: 9, send_hour_to: 21,
     prompt_template_id: "",
@@ -39,20 +117,49 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
 
   const inputCls = "w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 transition-colors";
+  const activeAccounts = accounts.filter(a => a.is_active);
+
+  const toggleAccount = (id) => {
+    setForm(f => {
+      const ids = f.account_ids.includes(id)
+        ? f.account_ids.filter(x => x !== id)
+        : [...f.account_ids, id];
+      return { ...f, account_ids: ids };
+    });
+  };
+
+  const handlePickerSelect = (chosen) => {
+    const lines = chosen.map(c => {
+      const parts = [c.username];
+      if (c.display_name) parts.push(c.display_name);
+      else if (c.company || c.role || c.custom_note) parts.push("");
+      if (c.company) parts.push(c.company);
+      else if (c.role || c.custom_note) parts.push("");
+      if (c.role) parts.push(c.role);
+      else if (c.custom_note) parts.push("");
+      if (c.custom_note) parts.push(c.custom_note);
+      // Trim trailing empty
+      while (parts.length > 1 && parts[parts.length - 1] === "") parts.pop();
+      return parts.join(",");
+    });
+    const existing = targetsText.trim();
+    setTargetsText(existing ? existing + "\n" + lines.join("\n") : lines.join("\n"));
+  };
 
   const handleSubmit = async () => {
     const messages = messagesText.split("---").map(m => m.trim()).filter(Boolean);
     const targets = targetsText.split("\n").map(t => t.trim()).filter(Boolean);
-    if (!form.name || !form.account_id) { setError("Заполни название и аккаунт"); return; }
+    if (!form.name) { setError("Заполни название"); return; }
+    if (form.account_ids.length === 0) { setError("Выбери хотя бы один аккаунт"); return; }
     if (!messages.length) { setError("Добавь хотя бы одно сообщение"); return; }
     if (!targets.length) { setError("Добавь хотя бы один контакт"); return; }
     setLoading(true); setError("");
     try {
       await api.createCampaign({
         ...form,
-        account_id: Number(form.account_id),
         prompt_template_id: form.prompt_template_id ? Number(form.prompt_template_id) : null,
         max_messages: form.max_messages ? Number(form.max_messages) : null,
         messages,
@@ -70,20 +177,38 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
   return (
     <Modal title="Новая кампания" onClose={onClose}>
       <div className="space-y-4">
+        {/* Name */}
         <div>
           <label className="text-xs font-medium text-zinc-400 block mb-1.5">Название</label>
           <input className={inputCls} placeholder="Outreach #1" value={form.name} onChange={e => setForm({...form, name: e.target.value})} />
         </div>
+
+        {/* Accounts — multi-select checkboxes */}
         <div>
-          <label className="text-xs font-medium text-zinc-400 block mb-1.5">Аккаунт для отправки</label>
-          <select className={inputCls} value={form.account_id} onChange={e => setForm({...form, account_id: e.target.value})}>
-            <option value="">— выбери аккаунт —</option>
-            {accounts.filter(a => a.is_active).map(a => (
-              <option key={a.id} value={a.id}>{a.name} ({a.phone})</option>
-            ))}
-          </select>
-          {accounts.filter(a => a.is_active).length === 0 && (
-            <p className="text-xs text-amber-400 mt-1">Нет активных аккаунтов</p>
+          <label className="text-xs font-medium text-zinc-400 block mb-1.5">
+            Аккаунты для отправки
+            {form.account_ids.length > 0 && (
+              <span className="ml-1.5 text-blue-400 font-normal">{form.account_ids.length} выбрано</span>
+            )}
+          </label>
+          {activeAccounts.length === 0 ? (
+            <p className="text-xs text-amber-400">Нет активных аккаунтов</p>
+          ) : (
+            <div className="space-y-1.5">
+              {activeAccounts.map(a => (
+                <label key={a.id} className={`flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer border transition-colors ${form.account_ids.includes(a.id) ? "bg-blue-600/10 border-blue-500/30 text-zinc-100" : "border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"}`}
+                  onClick={() => toggleAccount(a.id)}>
+                  <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors ${form.account_ids.includes(a.id) ? "bg-blue-600 border-blue-600" : "border-zinc-600"}`}>
+                    {form.account_ids.includes(a.id) && <span className="text-white text-[10px] font-bold">✓</span>}
+                  </div>
+                  <span className="text-sm">{a.name}</span>
+                  <span className="text-xs text-zinc-600 ml-auto">{a.phone}</span>
+                </label>
+              ))}
+            </div>
+          )}
+          {form.account_ids.length > 1 && (
+            <p className="text-[11px] text-zinc-600 mt-1.5">Контакты распределятся между аккаунтами автоматически</p>
           )}
         </div>
 
@@ -98,9 +223,6 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
-          {prompts.length === 0 && (
-            <p className="text-[11px] text-zinc-600 mt-1">Создай промпты в разделе Prompts чтобы назначать их</p>
-          )}
         </div>
 
         {/* Messages */}
@@ -121,9 +243,15 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
 
         {/* Targets */}
         <div>
-          <label className="text-xs font-medium text-zinc-400 block mb-1.5">
-            Контакты <span className="text-zinc-600 font-normal">— username[,имя[,компания[,роль[,заметка]]]]</span>
-          </label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-xs font-medium text-zinc-400">
+              Контакты <span className="text-zinc-600 font-normal">— username[,имя[,компания[,роль[,заметка]]]]</span>
+            </label>
+            <button type="button" onClick={() => setShowPicker(true)}
+              className="text-xs text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1 shrink-0">
+              👥 Из базы контактов
+            </button>
+          </div>
           <textarea rows={5} className={`${inputCls} resize-y font-mono text-xs`}
             placeholder={"john_doe\njane_smith,Джейн\nbob_cto,Боб,OpenAI,CTO,познакомились на ProductConf"}
             value={targetsText} onChange={e => setTargetsText(e.target.value)} />
@@ -215,6 +343,10 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
         <button onClick={handleSubmit} disabled={loading} className="btn-primary">{loading ? "Создаю..." : "Создать кампанию"}</button>
         <button onClick={onClose} className="btn-ghost">Отмена</button>
       </div>
+
+      {showPicker && (
+        <ContactPicker onClose={() => setShowPicker(false)} onSelect={handlePickerSelect} />
+      )}
     </Modal>
   );
 }
@@ -237,6 +369,13 @@ export default function Campaigns() {
   const handlePause = async id => { await api.pauseCampaign(id); load(); };
   const handleRetry = async id => { await api.retryFailed(id).catch(e => alert(e.message)); load(); };
   const handleDelete = async id => { if (!confirm("Удалить кампанию?")) return; await api.deleteCampaign(id); load(); };
+
+  const accountName = (ids) => {
+    if (!ids || ids.length === 0) return "—";
+    const names = ids.map(id => accounts.find(a => a.id === id)?.name || `#${id}`);
+    if (names.length === 1) return names[0];
+    return `${names[0]} +${names.length - 1}`;
+  };
 
   return (
     <div className="p-8 max-w-4xl">
@@ -276,7 +415,7 @@ export default function Campaigns() {
                         )}
                       </div>
                       <p className="text-xs text-zinc-500 mt-0.5">
-                        {c.delay_min}–{c.delay_max}с · {c.daily_limit}/день · {c.send_hour_from}:00–{c.send_hour_to}:00 MSK
+                        {accountName(c.account_ids)} · {c.delay_min}–{c.delay_max}с · {c.daily_limit}/день · {c.send_hour_from}:00–{c.send_hour_to}:00 MSK
                       </p>
                     </div>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 ${st.cls}`}>{st.label}</span>

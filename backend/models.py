@@ -86,12 +86,27 @@ class Message(Base):
     conversation = relationship("Conversation", back_populates="messages")
 
 
+class Contact(Base):
+    """Reusable contact library. Import once, use in multiple campaigns."""
+    __tablename__ = "contacts"
+
+    id = Column(Integer, primary_key=True)
+    username = Column(String(100), nullable=False, index=True)
+    display_name = Column(String(100), nullable=True)   # {first_name}
+    company = Column(String(200), nullable=True)        # {company}
+    role = Column(String(200), nullable=True)           # {role}
+    custom_note = Column(Text, nullable=True)           # {note}
+    tags = Column(String(300), nullable=True)           # comma-separated tags
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Campaign(Base):
     __tablename__ = "campaigns"
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
+    account_ids = Column(Text, nullable=True)  # JSON list e.g. "[1,2,3]"; if set, overrides account_id
     messages = Column(Text, nullable=False)  # JSON list of variants
     delay_min = Column(Integer, default=30)
     delay_max = Column(Integer, default=90)

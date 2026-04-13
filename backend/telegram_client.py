@@ -592,12 +592,19 @@ async def _campaign_worker(campaign_id: int):
                     logger.info(f"Campaign {campaign_id}: skipped {target.username} (DNC)")
                     continue
 
-                # ── Deduplication: skip if already sent from this account ──
+                # ── Resolve account list for this campaign ──
+                if campaign.account_ids:
+                    acc_ids = json.loads(campaign.account_ids)
+                else:
+                    acc_ids = [campaign.account_id]
+
+                # ── Deduplication: skip if already sent from any account in this campaign ──
+                from sqlalchemy import or_ as _or
                 already_sent = db.query(CampaignTarget).join(
                     Campaign, CampaignTarget.campaign_id == Campaign.id
                 ).filter(
                     CampaignTarget.username == target.username,
-                    Campaign.account_id == campaign.account_id,
+                    _or(*[Campaign.account_id == aid for aid in acc_ids]),
                     CampaignTarget.status == "sent",
                     CampaignTarget.campaign_id != campaign_id,
                 ).first()
@@ -608,12 +615,14 @@ async def _campaign_worker(campaign_id: int):
                     logger.info(f"Campaign {campaign_id}: skipped {target.username} (already sent from account)")
                     continue
 
-                client = _clients.get(campaign.account_id)
-                if not client:
-                    logger.warning(f"Campaign {campaign_id}: account not connected, retrying in 60s")
+                # ── Pick a connected client (random among available) ──
+                available = [(aid, _clients[aid]) for aid in acc_ids if aid in _clients]
+                if not available:
+                    logger.warning(f"Campaign {campaign_id}: no accounts connected, retrying in 60s")
                     db.close()
                     await asyncio.sleep(60)
                     continue
+                _account_id, client = random.choice(available)
 
                 messages = json.loads(campaign.messages)
                 text = random.choice(messages)

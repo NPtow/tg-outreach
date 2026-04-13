@@ -14,9 +14,9 @@ router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
 class CampaignCreate(BaseModel):
     name: str
-    account_id: int
+    account_ids: List[int]           # one or more accounts
     messages: List[str]
-    targets: List[str]          # "username" or "username,name,company,role,note"
+    targets: List[str]               # "username" or "username,name,company,role,note"
     delay_min: int = 30
     delay_max: int = 90
     daily_limit: int = 20
@@ -44,10 +44,16 @@ def list_campaigns(db: Session = Depends(get_db)):
         skipped = db.query(CampaignTarget).filter(
             CampaignTarget.campaign_id == c.id, CampaignTarget.status == "skipped"
         ).count()
+        # Resolve account_ids list
+        if c.account_ids:
+            acc_ids = json.loads(c.account_ids)
+        else:
+            acc_ids = [c.account_id]
         result.append({
             "id": c.id,
             "name": c.name,
             "account_id": c.account_id,
+            "account_ids": acc_ids,
             "status": c.status,
             "is_running": tg.campaign_is_running(c.id),
             "delay_min": c.delay_min,
@@ -75,10 +81,13 @@ def create_campaign(data: CampaignCreate, db: Session = Depends(get_db)):
         raise HTTPException(400, "Need at least one message variant")
     if not data.targets:
         raise HTTPException(400, "Need at least one target")
+    if not data.account_ids:
+        raise HTTPException(400, "Need at least one account")
 
     c = Campaign(
         name=data.name,
-        account_id=data.account_id,
+        account_id=data.account_ids[0],          # primary account (for compat)
+        account_ids=json.dumps(data.account_ids),
         messages=json.dumps(data.messages),
         delay_min=data.delay_min,
         delay_max=data.delay_max,
@@ -123,8 +132,10 @@ async def start_campaign(campaign_id: int, db: Session = Depends(get_db)):
     c = db.query(Campaign).filter(Campaign.id == campaign_id).first()
     if not c:
         raise HTTPException(404, "Campaign not found")
-    if not tg.is_running(c.account_id):
-        raise HTTPException(400, "Account is not connected")
+    account_ids = json.loads(c.account_ids) if c.account_ids else [c.account_id]
+    connected = [aid for aid in account_ids if tg.is_running(aid)]
+    if not connected:
+        raise HTTPException(400, "No accounts connected")
     c.status = "running"
     db.commit()
     await tg.start_campaign(campaign_id)

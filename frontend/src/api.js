@@ -63,6 +63,13 @@ export const api = {
   addDNC: (data) => req("POST", "/api/dnc/", data),
   removeDNC: (id) => req("DELETE", `/api/dnc/${id}`),
 
+  // Contacts
+  getContacts: (search) => req("GET", `/api/contacts/${search ? `?search=${encodeURIComponent(search)}` : ""}`),
+  createContact: (data) => req("POST", "/api/contacts/", data),
+  importContacts: (csv_text) => req("POST", "/api/contacts/import", { csv_text }),
+  deleteContact: (id) => req("DELETE", `/api/contacts/${id}`),
+  bulkDeleteContacts: (ids) => req("DELETE", "/api/contacts/bulk", { ids }),
+
   // Settings
   getSettings: () => req("GET", "/api/settings/"),
   saveSettings: (data) => req("PUT", "/api/settings/", data),

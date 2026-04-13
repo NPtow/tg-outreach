@@ -25,7 +25,7 @@ def get_db():
 
 
 def init_db():
-    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact  # noqa
+    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact, Contact  # noqa
     Base.metadata.create_all(bind=engine)
 
     # Add new columns to existing tables (safe to re-run — errors for existing columns are swallowed)
@@ -40,6 +40,7 @@ def init_db():
         ("accounts", "proxy_pass TEXT"),
         ("accounts", "prompt_template_id INTEGER"),
         # campaigns
+        ("campaigns", "account_ids TEXT"),
         ("campaigns", "send_hour_from INTEGER DEFAULT 9"),
         ("campaigns", "send_hour_to INTEGER DEFAULT 21"),
         ("campaigns", "prompt_template_id INTEGER"),
