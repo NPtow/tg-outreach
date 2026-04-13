@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -8,6 +9,8 @@ from sqlalchemy.orm import Session
 from backend.database import get_db
 from backend.models import Campaign, CampaignTarget
 import backend.telegram_client as tg
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
@@ -132,17 +135,23 @@ def create_campaign(data: CampaignCreate, db: Session = Depends(get_db)):
 
 @router.post("/{campaign_id}/start")
 async def start_campaign(campaign_id: int, db: Session = Depends(get_db)):
-    c = db.query(Campaign).filter(Campaign.id == campaign_id).first()
-    if not c:
-        raise HTTPException(404, "Campaign not found")
-    account_ids = json.loads(c.account_ids) if c.account_ids else [c.account_id]
-    connected = [aid for aid in account_ids if tg.is_running(aid)]
-    if not connected:
-        raise HTTPException(400, "No accounts connected")
-    c.status = "running"
-    db.commit()
-    await tg.start_campaign(campaign_id)
-    return {"ok": True}
+    try:
+        c = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+        if not c:
+            raise HTTPException(404, "Campaign not found")
+        account_ids = json.loads(c.account_ids) if c.account_ids else [c.account_id]
+        connected = [aid for aid in account_ids if tg.is_running(aid)]
+        if not connected:
+            raise HTTPException(400, f"No accounts connected (account_ids={account_ids})")
+        c.status = "running"
+        db.commit()
+        await tg.start_campaign(campaign_id)
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"start_campaign {campaign_id} failed: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
 
 
 @router.post("/{campaign_id}/pause")

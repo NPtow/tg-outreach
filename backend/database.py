@@ -74,3 +74,25 @@ def init_db():
                 conn.commit()
             except Exception:
                 conn.rollback()  # PostgreSQL requires rollback after error before next statement
+
+    # For PostgreSQL: convert INTEGER boolean columns to proper BOOLEAN type.
+    # These were originally added via ADD COLUMN ... INTEGER, causing comparison errors.
+    # Safe to re-run — ALTER on already-BOOLEAN column will fail silently.
+    if not DATABASE_URL.startswith("sqlite"):
+        bool_cols = [
+            ("conversations", "is_hot"),
+            ("campaigns", "send_window_enabled"),
+            ("campaigns", "stop_on_reply"),
+            ("accounts", "auto_reply"),
+            ("accounts", "needs_reauth"),
+            ("settings", "auto_reply_enabled"),
+        ]
+        with engine.connect() as conn:
+            for table, col in bool_cols:
+                try:
+                    conn.execute(text(
+                        f"ALTER TABLE {table} ALTER COLUMN {col} TYPE BOOLEAN USING {col}::boolean"
+                    ))
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
