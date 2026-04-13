@@ -274,6 +274,7 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
 
   return (
     <Modal title="Новая кампания" onClose={onClose}>
+      {error && <p className="text-red-400 text-xs mb-4 bg-red-500/10 px-3 py-2 rounded-lg">{error}</p>}
       <div className="space-y-4">
         {/* Name */}
         <div>
@@ -450,7 +451,6 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
         </div>
       </div>
 
-      {error && <p className="text-red-400 text-xs mt-4 bg-red-500/10 px-3 py-2 rounded-lg">{error}</p>}
       <div className="flex gap-2 mt-5">
         <button onClick={handleSubmit} disabled={loading} className="btn-primary">{loading ? "Создаю..." : "Создать кампанию"}</button>
         <button onClick={onClose} className="btn-ghost">Отмена</button>

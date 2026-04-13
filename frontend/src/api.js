@@ -6,7 +6,9 @@ async function req(method, path, body) {
   const r = await fetch(BASE + path, opts);
   if (!r.ok) {
     const err = await r.json().catch(() => ({ detail: r.statusText }));
-    throw new Error(err.detail || r.statusText);
+    const msg = err.detail || r.statusText;
+    window.dispatchEvent(new CustomEvent("api-error", { detail: { message: msg, url: path, status: r.status } }));
+    throw new Error(msg);
   }
   return r.json();
 }

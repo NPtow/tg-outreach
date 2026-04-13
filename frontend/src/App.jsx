@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
+import { useEffect, useState } from "react";
 import Accounts from "./pages/Accounts";
 import Campaigns from "./pages/Campaigns";
 import Contacts from "./pages/Contacts";
@@ -6,6 +7,48 @@ import Conversations from "./pages/Conversations";
 import Prompts from "./pages/Prompts";
 import Settings from "./pages/Settings";
 import { useWS } from "./ws";
+
+function ErrorToast() {
+  const [errors, setErrors] = useState([]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      const id = Date.now();
+      const { message, url, status } = e.detail;
+      setErrors(prev => [...prev, { id, message, url, status }]);
+      setTimeout(() => setErrors(prev => prev.filter(x => x.id !== id)), 10000);
+    };
+    window.addEventListener("api-error", handler);
+    return () => window.removeEventListener("api-error", handler);
+  }, []);
+
+  if (errors.length === 0) return null;
+
+  return (
+    <div className="fixed bottom-4 right-4 z-[9999] flex flex-col gap-2 max-w-sm w-full">
+      {errors.map(err => (
+        <div key={err.id} className="bg-zinc-900 border border-red-500/50 rounded-xl shadow-2xl overflow-hidden">
+          <div className="flex items-center gap-2 px-3 py-2 bg-red-500/10 border-b border-red-500/20">
+            <span className="text-red-400 text-xs font-semibold">Ошибка {err.status && `· ${err.status}`}</span>
+            {err.url && <span className="text-zinc-600 text-xs font-mono ml-auto truncate">{err.url}</span>}
+            <button
+              onClick={() => setErrors(prev => prev.filter(x => x.id !== err.id))}
+              className="text-zinc-500 hover:text-zinc-200 text-base leading-none shrink-0 ml-1">×</button>
+          </div>
+          <div className="px-3 py-2.5 flex items-start gap-2">
+            <p className="text-sm text-zinc-100 flex-1 break-all select-all">{err.message}</p>
+            <button
+              onClick={() => navigator.clipboard.writeText(err.message)}
+              title="Копировать"
+              className="text-zinc-500 hover:text-zinc-200 text-xs shrink-0 px-1.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 transition-colors">
+              copy
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 const NAV = [
   { to: "/", label: "Inbox", icon: "💬", end: true },
@@ -63,6 +106,7 @@ export default function App() {
           </Routes>
         </main>
       </div>
+      <ErrorToast />
     </BrowserRouter>
   );
 }
