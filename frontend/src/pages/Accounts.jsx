@@ -133,7 +133,7 @@ function ImportTdataModal({ onClose, onAdded }) {
               onChange={e => setFile(e.target.files[0])} />
           </div>
           <div className="border-t border-zinc-800 pt-3">
-            <p className="text-xs font-medium text-zinc-500 mb-2.5">Прокси (опционально)</p>
+            <p className="text-xs font-medium text-zinc-500 mb-2.5">Прокси (рекомендуется для USA аккаунтов)</p>
             <div className="grid grid-cols-2 gap-2">
               <Field label="Хост" placeholder="102.129.221.128" value={form.proxy_host} onChange={e => set("proxy_host", e.target.value)} />
               <Field label="Порт" placeholder="9671" value={form.proxy_port} onChange={e => set("proxy_port", e.target.value)} />
@@ -163,10 +163,21 @@ function ImportTdataModal({ onClose, onAdded }) {
 
 export default function Accounts() {
   const [accounts, setAccounts] = useState([]);
+  const [prompts, setPrompts] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [showTdata, setShowTdata] = useState(false);
+
   const load = () => api.getAccounts().then(setAccounts);
-  useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    load();
+    api.getPrompts().then(setPrompts);
+  }, []);
+
+  const handleSetPrompt = async (accId, promptId) => {
+    await api.setPrompt(accId, promptId ? Number(promptId) : null);
+    load();
+  };
 
   return (
     <div className="p-8 max-w-3xl">
@@ -189,31 +200,53 @@ export default function Accounts() {
         </div>
       ) : (
         <div className="space-y-2">
-          {accounts.map(acc => (
-            <div key={acc.id} className="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4 flex items-center justify-between hover:border-zinc-700 transition-colors">
-              <div className="flex items-center gap-3">
-                <div className={`w-2 h-2 rounded-full ${acc.is_active ? "bg-emerald-500" : "bg-zinc-600"}`} />
-                <div>
-                  <p className="text-sm font-medium text-zinc-100">{acc.name}</p>
-                  <p className="text-xs text-zinc-500">{acc.phone}</p>
+          {accounts.map(acc => {
+            const assignedPrompt = prompts.find(p => p.id === acc.prompt_template_id);
+            return (
+              <div key={acc.id} className="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4 hover:border-zinc-700 transition-colors">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-2 h-2 rounded-full shrink-0 ${acc.is_active ? "bg-emerald-500" : "bg-zinc-600"}`} />
+                    <div>
+                      <p className="text-sm font-medium text-zinc-100">{acc.name}</p>
+                      <p className="text-xs text-zinc-500">{acc.phone}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className={`text-xs px-2 py-1 rounded-full font-medium ${acc.is_active ? "bg-emerald-500/10 text-emerald-400" : "bg-zinc-800 text-zinc-500"}`}>
+                      {acc.is_active ? "Online" : "Offline"}
+                    </span>
+                    <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer select-none">
+                      <div className={`relative w-8 h-4 rounded-full transition-colors ${acc.auto_reply ? "bg-blue-600" : "bg-zinc-700"}`}
+                        onClick={() => api.toggleReply(acc.id).then(load)}>
+                        <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all ${acc.auto_reply ? "left-[18px]" : "left-0.5"}`} />
+                      </div>
+                      Auto-reply
+                    </label>
+                    <button onClick={() => { if (confirm("Удалить?")) api.deleteAccount(acc.id).then(load); }}
+                      className="text-xs text-zinc-600 hover:text-red-400 transition-colors">Delete</button>
+                  </div>
+                </div>
+                {/* Prompt selector */}
+                <div className="mt-3 pt-3 border-t border-zinc-800/60 flex items-center gap-2">
+                  <span className="text-[11px] text-zinc-500 shrink-0">Промпт агента:</span>
+                  <select
+                    className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-zinc-300 focus:outline-none focus:border-blue-500 transition-colors"
+                    value={acc.prompt_template_id || ""}
+                    onChange={e => handleSetPrompt(acc.id, e.target.value)}
+                  >
+                    <option value="">— глобальный (из Settings) —</option>
+                    {prompts.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                  {assignedPrompt && (
+                    <span className="text-[10px] bg-violet-500/15 text-violet-400 px-1.5 py-0.5 rounded-full shrink-0">{assignedPrompt.name}</span>
+                  )}
                 </div>
               </div>
-              <div className="flex items-center gap-3">
-                <span className={`text-xs px-2 py-1 rounded-full font-medium ${acc.is_active ? "bg-emerald-500/10 text-emerald-400" : "bg-zinc-800 text-zinc-500"}`}>
-                  {acc.is_active ? "Online" : "Offline"}
-                </span>
-                <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer select-none">
-                  <div className={`relative w-8 h-4 rounded-full transition-colors ${acc.auto_reply ? "bg-blue-600" : "bg-zinc-700"}`}
-                    onClick={() => api.toggleReply(acc.id).then(load)}>
-                    <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all ${acc.auto_reply ? "left-4.5" : "left-0.5"}`} />
-                  </div>
-                  Auto-reply
-                </label>
-                <button onClick={() => { if (confirm("Удалить?")) api.deleteAccount(acc.id).then(load); }}
-                  className="text-xs text-zinc-600 hover:text-red-400 transition-colors">Delete</button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

@@ -23,16 +23,22 @@ function Modal({ title, onClose, children }) {
   );
 }
 
-function CreateModal({ accounts, onClose, onCreated }) {
+function CreateModal({ accounts, prompts, onClose, onCreated }) {
   const [form, setForm] = useState({
     name: "", account_id: "",
     delay_min: 30, delay_max: 90, daily_limit: 20,
     send_hour_from: 9, send_hour_to: 21,
+    prompt_template_id: "",
+    stop_on_reply: true,
+    stop_keywords: "",
+    hot_keywords: "",
+    max_messages: "",
   });
   const [messagesText, setMessagesText] = useState("");
   const [targetsText, setTargetsText] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const inputCls = "w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 transition-colors";
 
@@ -47,6 +53,8 @@ function CreateModal({ accounts, onClose, onCreated }) {
       await api.createCampaign({
         ...form,
         account_id: Number(form.account_id),
+        prompt_template_id: form.prompt_template_id ? Number(form.prompt_template_id) : null,
+        max_messages: form.max_messages ? Number(form.max_messages) : null,
         messages,
         targets,
       });
@@ -55,10 +63,9 @@ function CreateModal({ accounts, onClose, onCreated }) {
     finally { setLoading(false); }
   };
 
-  // Count targets respecting csv format
   const targetCount = targetsText.split("\n").filter(t => t.trim()).length;
-  const hasPersonalization = messagesText.includes("{first_name}");
   const csvCount = targetsText.split("\n").filter(t => t.includes(",") && t.trim()).length;
+  const usedVars = ["first_name","company","role","note"].filter(v => messagesText.includes(`{${v}}`));
 
   return (
     <Modal title="Новая кампания" onClose={onClose}>
@@ -76,34 +83,58 @@ function CreateModal({ accounts, onClose, onCreated }) {
             ))}
           </select>
           {accounts.filter(a => a.is_active).length === 0 && (
-            <p className="text-xs text-amber-400 mt-1">Нет активных аккаунтов — сначала подключи аккаунт</p>
+            <p className="text-xs text-amber-400 mt-1">Нет активных аккаунтов</p>
           )}
         </div>
+
+        {/* Prompt selector */}
         <div>
           <label className="text-xs font-medium text-zinc-400 block mb-1.5">
-            Варианты сообщений <span className="text-zinc-600 font-normal">— разделяй через ---</span>
+            Промпт агента <span className="text-zinc-600 font-normal">— для авто-ответов на входящие</span>
+          </label>
+          <select className={inputCls} value={form.prompt_template_id} onChange={e => setForm({...form, prompt_template_id: e.target.value})}>
+            <option value="">— глобальный (из Settings) —</option>
+            {prompts.map(p => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+          {prompts.length === 0 && (
+            <p className="text-[11px] text-zinc-600 mt-1">Создай промпты в разделе Prompts чтобы назначать их</p>
+          )}
+        </div>
+
+        {/* Messages */}
+        <div>
+          <label className="text-xs font-medium text-zinc-400 block mb-1.5">
+            Варианты первого сообщения <span className="text-zinc-600 font-normal">— разделяй через ---</span>
           </label>
           <textarea rows={5} className={`${inputCls} resize-y`}
-            placeholder={"Привет, {first_name}! Хотел бы обсудить сотрудничество...\n---\nДобрый день! Увидел твой профиль и думаю..."}
+            placeholder={"Привет, {first_name}! Ты из {company}? Хочу обсудить...\n---\nДобрый день! Вижу что ты {role}, интересно..."}
             value={messagesText} onChange={e => setMessagesText(e.target.value)} />
-          <p className="text-[11px] text-zinc-600 mt-1">
-            {messagesText.split("---").filter(m => m.trim()).length} вариант(а)
-            {hasPersonalization && <span className="text-blue-400 ml-2">· использует {"{first_name}"}</span>}
-          </p>
+          <div className="flex items-center gap-3 mt-1">
+            <p className="text-[11px] text-zinc-600">{messagesText.split("---").filter(m => m.trim()).length} вариант(а)</p>
+            {usedVars.length > 0 && (
+              <p className="text-[11px] text-blue-400">использует: {usedVars.map(v => `{${v}}`).join(", ")}</p>
+            )}
+          </div>
         </div>
+
+        {/* Targets */}
         <div>
           <label className="text-xs font-medium text-zinc-400 block mb-1.5">
-            Контакты <span className="text-zinc-600 font-normal">— username или username,Имя</span>
+            Контакты <span className="text-zinc-600 font-normal">— username[,имя[,компания[,роль[,заметка]]]]</span>
           </label>
           <textarea rows={5} className={`${inputCls} resize-y font-mono text-xs`}
-            placeholder={"username1\nusername2,Иван\nusername3,Мария"}
+            placeholder={"john_doe\njane_smith,Джейн\nbob_cto,Боб,OpenAI,CTO,познакомились на ProductConf"}
             value={targetsText} onChange={e => setTargetsText(e.target.value)} />
           <p className="text-[11px] text-zinc-600 mt-1">
             {targetCount} контактов
-            {csvCount > 0 && <span className="text-blue-400 ml-2">· {csvCount} с именем</span>}
+            {csvCount > 0 && <span className="text-blue-400 ml-2">· {csvCount} с доп.данными</span>}
           </p>
         </div>
-        <div className="grid grid-cols-3 gap-3 pt-1">
+
+        {/* Timing */}
+        <div className="grid grid-cols-3 gap-3">
           {[
             { k: "delay_min", label: "Задержка мин", suffix: "с" },
             { k: "delay_max", label: "Задержка макс", suffix: "с" },
@@ -119,15 +150,14 @@ function CreateModal({ accounts, onClose, onCreated }) {
             </div>
           ))}
         </div>
+
+        {/* Time window */}
         <div>
           <label className="text-xs font-medium text-zinc-400 block mb-1.5">
             Окно отправки <span className="text-zinc-600 font-normal">— по Москве (UTC+3)</span>
           </label>
           <div className="grid grid-cols-2 gap-3">
-            {[
-              { k: "send_hour_from", label: "С (час)" },
-              { k: "send_hour_to", label: "До (час)" },
-            ].map(({ k, label }) => (
+            {[{ k: "send_hour_from", label: "С (час)" }, { k: "send_hour_to", label: "До (час)" }].map(({ k, label }) => (
               <div key={k}>
                 <label className="text-xs text-zinc-500 block mb-1">{label}</label>
                 <input type="number" min={0} max={23} className={inputCls} value={form[k]}
@@ -135,11 +165,51 @@ function CreateModal({ accounts, onClose, onCreated }) {
               </div>
             ))}
           </div>
-          <p className="text-[11px] text-zinc-600 mt-1">
-            Сообщения отправляются только с {form.send_hour_from}:00 до {form.send_hour_to}:00 MSK
-          </p>
+          <p className="text-[11px] text-zinc-600 mt-1">Отправка с {form.send_hour_from}:00 до {form.send_hour_to}:00 MSK</p>
+        </div>
+
+        {/* Advanced / stop conditions */}
+        <div className="border-t border-zinc-800 pt-3">
+          <button type="button" onClick={() => setShowAdvanced(!showAdvanced)}
+            className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors flex items-center gap-1">
+            <span className={`transition-transform ${showAdvanced ? "rotate-90" : ""}`}>▶</span>
+            Условия остановки
+          </button>
+          {showAdvanced && (
+            <div className="space-y-3 mt-3">
+              <label className="flex items-center gap-2.5 text-sm text-zinc-300 cursor-pointer">
+                <div className={`relative w-8 h-4 rounded-full transition-colors shrink-0 ${form.stop_on_reply ? "bg-blue-600" : "bg-zinc-700"}`}
+                  onClick={() => setForm({...form, stop_on_reply: !form.stop_on_reply})}>
+                  <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all ${form.stop_on_reply ? "left-[18px]" : "left-0.5"}`} />
+                </div>
+                <span className="text-xs text-zinc-300">Остановить авто-ответ когда человек написал</span>
+              </label>
+              <div>
+                <label className="text-xs font-medium text-zinc-400 block mb-1.5">
+                  Стоп-слова <span className="text-zinc-600 font-normal">— через запятую → добавить в чёрный список</span>
+                </label>
+                <input className={inputCls} placeholder="нет,отписка,стоп,не интересно"
+                  value={form.stop_keywords} onChange={e => setForm({...form, stop_keywords: e.target.value})} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-zinc-400 block mb-1.5">
+                  Горячие слова <span className="text-zinc-600 font-normal">— через запятую → пометить 🔥</span>
+                </label>
+                <input className={inputCls} placeholder="интересно,расскажи,позвони,да"
+                  value={form.hot_keywords} onChange={e => setForm({...form, hot_keywords: e.target.value})} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-zinc-400 block mb-1.5">
+                  Макс. ответов GPT <span className="text-zinc-600 font-normal">— затем пауза (пусто = без лимита)</span>
+                </label>
+                <input type="number" className={inputCls} placeholder="5"
+                  value={form.max_messages} onChange={e => setForm({...form, max_messages: e.target.value})} />
+              </div>
+            </div>
+          )}
         </div>
       </div>
+
       {error && <p className="text-red-400 text-xs mt-4 bg-red-500/10 px-3 py-2 rounded-lg">{error}</p>}
       <div className="flex gap-2 mt-5">
         <button onClick={handleSubmit} disabled={loading} className="btn-primary">{loading ? "Создаю..." : "Создать кампанию"}</button>
@@ -152,10 +222,15 @@ function CreateModal({ accounts, onClose, onCreated }) {
 export default function Campaigns() {
   const [campaigns, setCampaigns] = useState([]);
   const [accounts, setAccounts] = useState([]);
+  const [prompts, setPrompts] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const load = () => api.getCampaigns().then(setCampaigns);
 
-  useEffect(() => { load(); api.getAccounts().then(setAccounts); }, []);
+  useEffect(() => {
+    load();
+    api.getAccounts().then(setAccounts);
+    api.getPrompts().then(setPrompts);
+  }, []);
   useWsEvent(msg => { if (msg.event === "campaign_progress") load(); });
 
   const handleStart = async id => { await api.startCampaign(id).catch(e => alert(e.message)); load(); };
@@ -184,15 +259,24 @@ export default function Campaigns() {
           {campaigns.map(c => {
             const pct = c.total ? Math.round((c.sent / c.total) * 100) : 0;
             const st = STATUS[c.status] || STATUS.draft;
+            const promptName = prompts.find(p => p.id === c.prompt_template_id)?.name;
             return (
               <div key={c.id} className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 hover:border-zinc-700 transition-colors">
                 <div className="flex items-start justify-between gap-4 mb-3">
                   <div className="flex items-center gap-3 min-w-0">
                     <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${c.is_running ? "bg-emerald-500 animate-pulse" : "bg-zinc-600"}`} />
                     <div className="min-w-0">
-                      <p className="font-medium text-zinc-100 text-sm">{c.name}</p>
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium text-zinc-100 text-sm">{c.name}</p>
+                        {promptName && (
+                          <span className="text-[10px] bg-violet-500/15 text-violet-400 px-1.5 py-0.5 rounded-full shrink-0">{promptName}</span>
+                        )}
+                        {c.stop_on_reply && (
+                          <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full shrink-0">⏸ reply</span>
+                        )}
+                      </div>
                       <p className="text-xs text-zinc-500 mt-0.5">
-                        задержка {c.delay_min}–{c.delay_max}с · лимит {c.daily_limit}/день · {c.send_hour_from}:00–{c.send_hour_to}:00 MSK
+                        {c.delay_min}–{c.delay_max}с · {c.daily_limit}/день · {c.send_hour_from}:00–{c.send_hour_to}:00 MSK
                       </p>
                     </div>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 ${st.cls}`}>{st.label}</span>
@@ -240,7 +324,7 @@ export default function Campaigns() {
       )}
 
       {showModal && (
-        <CreateModal accounts={accounts} onClose={() => setShowModal(false)}
+        <CreateModal accounts={accounts} prompts={prompts} onClose={() => setShowModal(false)}
           onCreated={() => { setShowModal(false); load(); }} />
       )}
     </div>

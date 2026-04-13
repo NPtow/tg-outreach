@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
 import Accounts from "./pages/Accounts";
 import Campaigns from "./pages/Campaigns";
 import Conversations from "./pages/Conversations";
+import Prompts from "./pages/Prompts";
 import Settings from "./pages/Settings";
 import { useWS } from "./ws";
 
@@ -9,6 +10,7 @@ const NAV = [
   { to: "/", label: "Inbox", icon: "💬", end: true },
   { to: "/accounts", label: "Accounts", icon: "👤" },
   { to: "/campaigns", label: "Campaigns", icon: "📢" },
+  { to: "/prompts", label: "Prompts", icon: "🧠" },
   { to: "/settings", label: "Settings", icon: "⚙️" },
 ];
 
@@ -53,6 +55,7 @@ export default function App() {
             <Route path="/" element={<Conversations />} />
             <Route path="/accounts" element={<Accounts />} />
             <Route path="/campaigns" element={<Campaigns />} />
+            <Route path="/prompts" element={<Prompts />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>

@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from backend.database import init_db
-from backend.routers import accounts, conversations, settings, campaigns
+from backend.routers import accounts, conversations, settings, campaigns, prompts, dnc
 import backend.telegram_client as tg
 
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +53,8 @@ app.include_router(accounts.router)
 app.include_router(conversations.router)
 app.include_router(settings.router)
 app.include_router(campaigns.router)
+app.include_router(prompts.router)
+app.include_router(dnc.router)
 
 
 @app.websocket("/ws")

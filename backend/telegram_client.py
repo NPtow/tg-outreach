@@ -21,7 +21,10 @@ from telethon.sessions import StringSession
 from telethon.tl.types import User
 
 from backend.database import SessionLocal
-from backend.models import Account, Campaign, CampaignTarget, Conversation, Message, Settings
+from backend.models import (
+    Account, Campaign, CampaignTarget, Conversation,
+    DoNotContact, Message, Settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +39,6 @@ SESSIONS_DIR = "sessions"
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 _ws_broadcast = None
-
-# Moscow offset — UTC+3
 _MSK_OFFSET = timedelta(hours=3)
 
 
@@ -70,7 +71,6 @@ def _make_client(account: Account) -> TelegramClient:
 
 
 async def _save_session_string(account_id: int, client: TelegramClient):
-    """Persist session string to DB so it survives restarts in cloud."""
     db = SessionLocal()
     try:
         acc = db.query(Account).filter(Account.id == account_id).first()
@@ -79,6 +79,54 @@ async def _save_session_string(account_id: int, client: TelegramClient):
             db.commit()
     finally:
         db.close()
+
+
+def _resolve_prompt(settings: Settings, account: Account, campaign: Campaign | None) -> str:
+    """
+    Resolve the active system prompt with priority:
+    campaign.prompt_template > account.prompt_template > settings.system_prompt
+    """
+    if campaign and campaign.prompt_template_id and campaign.prompt_template:
+        return campaign.prompt_template.system_prompt
+    if account and account.prompt_template_id and account.prompt_template:
+        return account.prompt_template.system_prompt
+    return settings.system_prompt if settings else ""
+
+
+def _is_in_dnc(db, username: str | None, tg_user_id: str | None) -> bool:
+    q = db.query(DoNotContact)
+    if username:
+        entry = q.filter(DoNotContact.username == username).first()
+        if entry:
+            return True
+    if tg_user_id:
+        entry = q.filter(DoNotContact.tg_user_id == tg_user_id).first()
+        if entry:
+            return True
+    return False
+
+
+def _add_to_dnc(db, username: str | None, tg_user_id: str | None, reason: str):
+    if not username and not tg_user_id:
+        return
+    existing = _is_in_dnc(db, username, tg_user_id)
+    if not existing:
+        db.add(DoNotContact(username=username, tg_user_id=tg_user_id, reason=reason))
+        db.commit()
+
+
+def _find_source_campaign(db, account_id: int, username: str | None) -> int | None:
+    """Find campaign that sent a message to this username from this account."""
+    if not username:
+        return None
+    target = db.query(CampaignTarget).join(
+        Campaign, CampaignTarget.campaign_id == Campaign.id
+    ).filter(
+        Campaign.account_id == account_id,
+        CampaignTarget.username == username,
+        CampaignTarget.status == "sent",
+    ).order_by(CampaignTarget.sent_at.desc()).first()
+    return target.campaign_id if target else None
 
 
 async def _handle_message(account_id: int, event):
@@ -101,47 +149,169 @@ async def _handle_message(account_id: int, event):
             return
 
         tg_user_id = str(sender.id)
+        username = sender.username or None
         text = event.message.text or ""
 
+        # ── DNC check ──
+        if _is_in_dnc(db, username, tg_user_id):
+            logger.info(f"Ignoring message from DNC contact {username or tg_user_id}")
+            return
+
+        # ── Get or create conversation ──
         conv = db.query(Conversation).filter(
             Conversation.account_id == account_id,
             Conversation.tg_user_id == tg_user_id
         ).first()
 
-        if not conv:
+        is_new_conv = conv is None
+        if is_new_conv:
             conv = Conversation(
                 account_id=account_id,
                 tg_user_id=tg_user_id,
-                tg_username=sender.username or "",
+                tg_username=username or "",
                 tg_first_name=sender.first_name or "",
                 tg_last_name=sender.last_name or "",
+                unread_count=0,
             )
             db.add(conv)
             db.flush()
 
-        if conv.status == "paused":
-            msg = Message(conversation_id=conv.id, role="user", text=text)
-            db.add(msg)
-            conv.last_message = text
-            conv.last_message_at = datetime.utcnow()
-            db.commit()
-            return
+        # ── Link to source campaign (first time we see this person) ──
+        if not conv.source_campaign_id and username:
+            campaign_id = _find_source_campaign(db, account_id, username)
+            if campaign_id:
+                conv.source_campaign_id = campaign_id
 
+        # Load source campaign for stop conditions
+        source_campaign = None
+        if conv.source_campaign_id:
+            source_campaign = db.query(Campaign).filter(
+                Campaign.id == conv.source_campaign_id
+            ).first()
+
+        # ── Increment unread ──
+        conv.unread_count = (conv.unread_count or 0) + 1
+
+        # ── Save incoming message ──
         msg = Message(conversation_id=conv.id, role="user", text=text)
         db.add(msg)
         db.flush()
 
+        # ── Check stop keywords ──
+        if source_campaign and source_campaign.stop_keywords:
+            kws = [k.strip().lower() for k in source_campaign.stop_keywords.split(",") if k.strip()]
+            if any(kw in text.lower() for kw in kws):
+                conv.status = "done"
+                _add_to_dnc(db, username, tg_user_id, f"stop keyword in campaign {source_campaign.id}")
+                conv.last_message = text
+                conv.last_message_at = datetime.utcnow()
+                db.commit()
+                if _ws_broadcast:
+                    await _ws_broadcast({
+                        "event": "new_message",
+                        "conversation_id": conv.id,
+                        "account_id": account_id,
+                        "text": text,
+                        "unread_count": conv.unread_count,
+                    })
+                return
+
+        # ── Check hot keywords ──
+        if source_campaign and source_campaign.hot_keywords:
+            kws = [k.strip().lower() for k in source_campaign.hot_keywords.split(",") if k.strip()]
+            if any(kw in text.lower() for kw in kws):
+                conv.is_hot = True
+                if _ws_broadcast:
+                    await _ws_broadcast({
+                        "event": "hot_lead",
+                        "conversation_id": conv.id,
+                        "account_id": account_id,
+                        "text": text,
+                    })
+
+        # ── Stop on reply (hand off to inbox) ──
+        if source_campaign and source_campaign.stop_on_reply and conv.status == "active":
+            conv.status = "paused"
+            conv.last_message = text
+            conv.last_message_at = datetime.utcnow()
+            db.commit()
+            if _ws_broadcast:
+                await _ws_broadcast({
+                    "event": "new_message",
+                    "conversation_id": conv.id,
+                    "account_id": account_id,
+                    "text": text,
+                    "unread_count": conv.unread_count,
+                    "is_hot": bool(conv.is_hot),
+                    "paused_for_review": True,
+                })
+            return
+
+        # ── Conversation paused → record but don't reply ──
+        if conv.status == "paused":
+            conv.last_message = text
+            conv.last_message_at = datetime.utcnow()
+            db.commit()
+            if _ws_broadcast:
+                await _ws_broadcast({
+                    "event": "new_message",
+                    "conversation_id": conv.id,
+                    "account_id": account_id,
+                    "text": text,
+                    "unread_count": conv.unread_count,
+                })
+            return
+
+        # ── Max messages check ──
+        if source_campaign and source_campaign.max_messages:
+            assistant_count = db.query(Message).filter(
+                Message.conversation_id == conv.id,
+                Message.role == "assistant",
+            ).count()
+            if assistant_count >= source_campaign.max_messages:
+                conv.status = "paused"
+                conv.last_message = text
+                conv.last_message_at = datetime.utcnow()
+                db.commit()
+                if _ws_broadcast:
+                    await _ws_broadcast({
+                        "event": "new_message",
+                        "conversation_id": conv.id,
+                        "account_id": account_id,
+                        "text": text,
+                        "unread_count": conv.unread_count,
+                    })
+                return
+
+        # ── Load history and resolve prompt ──
         history = db.query(Message).filter(
             Message.conversation_id == conv.id
         ).order_by(Message.created_at.desc()).limit(settings.context_messages).all()
         history = list(reversed(history))
+
+        # Eagerly load prompt templates for resolution
+        db.expire_all()
+        account = db.query(Account).filter(Account.id == account_id).first()
+        if source_campaign and source_campaign.prompt_template_id:
+            from backend.models import PromptTemplate
+            source_campaign.prompt_template = db.query(PromptTemplate).filter(
+                PromptTemplate.id == source_campaign.prompt_template_id
+            ).first()
+        if account.prompt_template_id:
+            from backend.models import PromptTemplate
+            account.prompt_template = db.query(PromptTemplate).filter(
+                PromptTemplate.id == account.prompt_template_id
+            ).first()
+
+        system_prompt = _resolve_prompt(settings, account, source_campaign)
+
         db.commit()
 
         from backend.gpt_handler import generate_reply
         reply = await generate_reply(
             openai_key=settings.openai_key,
             model=settings.model,
-            system_prompt=settings.system_prompt,
+            system_prompt=system_prompt,
             history=history,
         )
 
@@ -162,6 +332,8 @@ async def _handle_message(account_id: int, event):
                     "conversation_id": conv.id,
                     "account_id": account_id,
                     "text": reply,
+                    "unread_count": conv.unread_count,
+                    "is_hot": bool(conv.is_hot),
                 })
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)
@@ -291,14 +463,12 @@ async def start_all_accounts():
                 if ok:
                     acc.is_active = True
                     db.commit()
-        # Resume campaigns that were running before restart
         await resume_running_campaigns(db)
     finally:
         db.close()
 
 
 async def resume_running_campaigns(db=None):
-    """Re-launch worker tasks for campaigns with status='running' after a restart."""
     close_db = db is None
     if close_db:
         db = SessionLocal()
@@ -342,18 +512,31 @@ def campaign_is_running(campaign_id: int) -> bool:
 
 
 def _seconds_until_window_open(hour_from: int, hour_to: int) -> int:
-    """Return seconds to sleep until the send window opens (MSK = UTC+3)."""
     now_msk = datetime.utcnow() + _MSK_OFFSET
     current_hour = now_msk.hour
     if hour_from <= current_hour < hour_to:
-        return 0  # already in window
-    # Calculate next window open time
+        return 0
     if current_hour < hour_from:
         target = now_msk.replace(hour=hour_from, minute=0, second=0, microsecond=0)
     else:
-        # past hour_to — wait until tomorrow
         target = (now_msk + timedelta(days=1)).replace(hour=hour_from, minute=0, second=0, microsecond=0)
     return max(0, int((target - now_msk).total_seconds()))
+
+
+def _apply_personalization(text: str, target: CampaignTarget) -> str:
+    """Substitute all {variable} placeholders from target fields."""
+    replacements = {
+        "{first_name}": target.display_name or "",
+        "{company}": target.company or "",
+        "{role}": target.role or "",
+        "{note}": target.custom_note or "",
+    }
+    for placeholder, value in replacements.items():
+        text = text.replace(placeholder, value)
+    # Clean up double spaces from empty substitutions
+    while "  " in text:
+        text = text.replace("  ", " ")
+    return text.strip()
 
 
 async def _campaign_worker(campaign_id: int):
@@ -402,6 +585,13 @@ async def _campaign_worker(campaign_id: int):
                     logger.info(f"Campaign {campaign_id}: all targets done")
                     break
 
+                # ── DNC check ──
+                if _is_in_dnc(db, target.username, None):
+                    target.status = "skipped"
+                    db.commit()
+                    logger.info(f"Campaign {campaign_id}: skipped {target.username} (DNC)")
+                    continue
+
                 # ── Deduplication: skip if already sent from this account ──
                 already_sent = db.query(CampaignTarget).join(
                     Campaign, CampaignTarget.campaign_id == Campaign.id
@@ -415,7 +605,7 @@ async def _campaign_worker(campaign_id: int):
                 if already_sent:
                     target.status = "skipped"
                     db.commit()
-                    logger.info(f"Campaign {campaign_id}: skipped {target.username} (already sent from this account)")
+                    logger.info(f"Campaign {campaign_id}: skipped {target.username} (already sent from account)")
                     continue
 
                 client = _clients.get(campaign.account_id)
@@ -427,13 +617,7 @@ async def _campaign_worker(campaign_id: int):
 
                 messages = json.loads(campaign.messages)
                 text = random.choice(messages)
-
-                # ── Personalization: replace {first_name} ──
-                first_name = target.display_name or ""
-                text = text.replace("{first_name}", first_name).strip()
-                # Clean up double spaces left after removing empty placeholder
-                while "  " in text:
-                    text = text.replace("  ", " ")
+                text = _apply_personalization(text, target)
 
                 try:
                     await client.send_message(target.username, text)
@@ -441,7 +625,6 @@ async def _campaign_worker(campaign_id: int):
                     target.sent_at = datetime.utcnow()
                     logger.info(f"Campaign {campaign_id}: sent to {target.username}")
                 except FloodWaitError as e:
-                    # Telegram says wait — pause the whole worker temporarily
                     wait = e.seconds + 5
                     logger.warning(f"Campaign {campaign_id}: FloodWait {e.seconds}s, sleeping {wait}s")
                     db.commit()
@@ -449,8 +632,7 @@ async def _campaign_worker(campaign_id: int):
                     await asyncio.sleep(wait)
                     continue
                 except PeerFloodError:
-                    # Account is heavily rate-limited — pause campaign to protect it
-                    logger.error(f"Campaign {campaign_id}: PeerFloodError — pausing campaign to protect account")
+                    logger.error(f"Campaign {campaign_id}: PeerFloodError — pausing to protect account")
                     campaign.status = "paused"
                     db.commit()
                     break

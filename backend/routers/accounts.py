@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import zipfile
 
+from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -46,6 +47,7 @@ def list_accounts(db: Session = Depends(get_db)):
             "app_id": a.app_id,
             "is_active": tg.is_running(a.id),
             "auto_reply": a.auto_reply,
+            "prompt_template_id": a.prompt_template_id,
             "created_at": a.created_at,
         }
         for a in accounts
@@ -100,6 +102,20 @@ def toggle_reply(account_id: int, db: Session = Depends(get_db)):
     acc.auto_reply = not acc.auto_reply
     db.commit()
     return {"auto_reply": acc.auto_reply}
+
+
+class SetPromptRequest(BaseModel):
+    prompt_template_id: int | None
+
+
+@router.post("/{account_id}/set-prompt")
+def set_prompt(account_id: int, data: SetPromptRequest, db: Session = Depends(get_db)):
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    acc.prompt_template_id = data.prompt_template_id
+    db.commit()
+    return {"ok": True, "prompt_template_id": acc.prompt_template_id}
 
 
 @router.post("/import-tdata")

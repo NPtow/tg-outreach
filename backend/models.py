@@ -4,6 +4,28 @@ from sqlalchemy.orm import relationship
 from backend.database import Base
 
 
+class PromptTemplate(Base):
+    """Reusable GPT prompt presets. Assigned per-account or per-campaign."""
+    __tablename__ = "prompt_templates"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    description = Column(String(300), nullable=True)
+    system_prompt = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class DoNotContact(Base):
+    """Global blacklist. Contacts here are never messaged."""
+    __tablename__ = "do_not_contact"
+
+    id = Column(Integer, primary_key=True)
+    username = Column(String(100), nullable=True, index=True)
+    tg_user_id = Column(String(50), nullable=True, index=True)
+    reason = Column(String(200), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -13,17 +35,20 @@ class Account(Base):
     app_id = Column(String(50), nullable=False)
     app_hash = Column(String(100), nullable=False)
     session_file = Column(String(200))
-    session_string = Column(Text, nullable=True)  # Telethon StringSession for cloud
+    session_string = Column(Text, nullable=True)
     is_active = Column(Boolean, default=False)
     auto_reply = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     proxy_host = Column(String(100), nullable=True)
     proxy_port = Column(Integer, nullable=True)
-    proxy_type = Column(String(10), nullable=True)  # HTTP | SOCKS5
+    proxy_type = Column(String(10), nullable=True)
     proxy_user = Column(String(100), nullable=True)
     proxy_pass = Column(String(100), nullable=True)
+    # Custom prompt for this account (overrides global Settings.system_prompt)
+    prompt_template_id = Column(Integer, ForeignKey("prompt_templates.id"), nullable=True)
 
     conversations = relationship("Conversation", back_populates="account")
+    prompt_template = relationship("PromptTemplate", foreign_keys=[prompt_template_id])
 
 
 class Conversation(Base):
@@ -39,9 +64,14 @@ class Conversation(Base):
     last_message = Column(Text)
     last_message_at = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Outreach tracking
+    source_campaign_id = Column(Integer, ForeignKey("campaigns.id"), nullable=True)
+    unread_count = Column(Integer, default=0)
+    is_hot = Column(Boolean, default=False)  # flagged by hot_keywords
 
     account = relationship("Account", back_populates="conversations")
     messages = relationship("Message", back_populates="conversation", order_by="Message.created_at")
+    source_campaign = relationship("Campaign", foreign_keys=[source_campaign_id])
 
 
 class Message(Base):
@@ -66,12 +96,20 @@ class Campaign(Base):
     delay_min = Column(Integer, default=30)
     delay_max = Column(Integer, default=90)
     daily_limit = Column(Integer, default=20)
-    send_hour_from = Column(Integer, default=9)   # MSK hour window start (inclusive)
-    send_hour_to = Column(Integer, default=21)    # MSK hour window end (exclusive)
+    send_hour_from = Column(Integer, default=9)
+    send_hour_to = Column(Integer, default=21)
     status = Column(String(20), default="draft")  # draft|running|paused|done
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Prompt override for auto-replies on this campaign's conversations
+    prompt_template_id = Column(Integer, ForeignKey("prompt_templates.id"), nullable=True)
+    # Stop conditions
+    stop_on_reply = Column(Boolean, default=True)   # pause auto-reply when person responds
+    stop_keywords = Column(Text, nullable=True)      # comma-separated: "нет,отписка,стоп"
+    hot_keywords = Column(Text, nullable=True)       # comma-separated: "интересно,расскажи"
+    max_messages = Column(Integer, nullable=True)    # max GPT replies per conversation
 
     targets = relationship("CampaignTarget", back_populates="campaign")
+    prompt_template = relationship("PromptTemplate", foreign_keys=[prompt_template_id])
 
 
 class CampaignTarget(Base):
@@ -80,8 +118,11 @@ class CampaignTarget(Base):
     id = Column(Integer, primary_key=True)
     campaign_id = Column(Integer, ForeignKey("campaigns.id"), nullable=False)
     username = Column(String(100), nullable=False)
-    display_name = Column(String(100), nullable=True)  # custom name for {first_name}
-    status = Column(String(20), default="pending")  # pending|sent|failed|skipped
+    display_name = Column(String(100), nullable=True)   # {first_name}
+    company = Column(String(200), nullable=True)        # {company}
+    role = Column(String(200), nullable=True)           # {role}
+    custom_note = Column(Text, nullable=True)           # {note}
+    status = Column(String(20), default="pending")      # pending|sent|failed|skipped
     sent_at = Column(DateTime, nullable=True)
     error = Column(Text, nullable=True)
 
