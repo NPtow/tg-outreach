@@ -23,25 +23,62 @@ function Modal({ title, onClose, children }) {
   );
 }
 
-// ── Contact picker modal ─────────────────────────────────────────
+// ── Contact picker modal (two-level: batches → contacts) ────────────────────
 function ContactPicker({ onClose, onSelect }) {
+  const [batches, setBatches] = useState([]);
+  const [activeBatch, setActiveBatch] = useState(null); // null = batch list
   const [contacts, setContacts] = useState([]);
   const [search, setSearch] = useState("");
-  const [picked, setPicked] = useState(new Set());
+  const [picked, setPicked] = useState(new Set()); // contact ids
 
-  useEffect(() => { api.getContacts().then(setContacts); }, []);
+  useEffect(() => { api.getContactBatches().then(setBatches); }, []);
 
-  const filtered = contacts.filter(c => {
-    if (!search) return true;
-    const s = search.toLowerCase();
-    return (c.username + (c.display_name || "") + (c.company || "") + (c.role || "")).toLowerCase().includes(s);
-  });
+  const loadContacts = (batchId) => {
+    api.getContacts("", batchId).then(setContacts);
+  };
 
-  const togglePick = (id) => setPicked(prev => {
-    const n = new Set(prev);
-    if (n.has(id)) n.delete(id); else n.add(id);
-    return n;
-  });
+  const drillIn = (batch) => {
+    setActiveBatch(batch);
+    setSearch("");
+    loadContacts(batch.id);
+  };
+
+  const selectAllBatch = (batch) => {
+    api.getContacts("", batch.id).then(cs => {
+      setPicked(prev => {
+        const n = new Set(prev);
+        cs.forEach(c => n.add(c.id));
+        return n;
+      });
+      // Also ensure we have these contacts cached for handleAdd
+      setContacts(prev => {
+        const existing = new Map(prev.map(c => [c.id, c]));
+        cs.forEach(c => existing.set(c.id, c));
+        return [...existing.values()];
+      });
+    });
+  };
+
+  const filtered = activeBatch
+    ? contacts.filter(c => {
+        if (!search) return true;
+        const s = search.toLowerCase();
+        return (c.username + (c.display_name || "") + (c.company || "") + (c.role || "")).toLowerCase().includes(s);
+      })
+    : [];
+
+  const togglePick = (c) => {
+    setPicked(prev => {
+      const n = new Set(prev);
+      if (n.has(c.id)) n.delete(c.id); else n.add(c.id);
+      return n;
+    });
+    setContacts(prev => {
+      const existing = new Map(prev.map(x => [x.id, x]));
+      existing.set(c.id, c);
+      return [...existing.values()];
+    });
+  };
 
   const handleAdd = () => {
     const chosen = contacts.filter(c => picked.has(c.id));
@@ -53,38 +90,98 @@ function ContactPicker({ onClose, onSelect }) {
     <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
       <div className="bg-zinc-900 rounded-2xl w-full max-w-xl border border-zinc-700/50 shadow-2xl max-h-[80vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 shrink-0">
-          <h2 className="text-base font-semibold text-zinc-100">Выбрать контакты из базы</h2>
-          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200 text-xl w-7 h-7 flex items-center justify-center rounded-lg hover:bg-zinc-800 transition-colors">×</button>
+          <div className="flex items-center gap-2 min-w-0">
+            {activeBatch && (
+              <button onClick={() => { setActiveBatch(null); setSearch(""); }} className="text-zinc-500 hover:text-zinc-200 text-sm mr-1">← </button>
+            )}
+            <h2 className="text-base font-semibold text-zinc-100 truncate">
+              {activeBatch ? activeBatch.name : "Выбрать контакты из базы"}
+            </h2>
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200 text-xl w-7 h-7 flex items-center justify-center rounded-lg hover:bg-zinc-800 transition-colors shrink-0">×</button>
         </div>
-        <div className="px-4 py-3 border-b border-zinc-800 shrink-0">
-          <input
-            className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500"
-            placeholder="Поиск..."
-            value={search} onChange={e => setSearch(e.target.value)}
-          />
-        </div>
-        <div className="flex-1 overflow-y-auto divide-y divide-zinc-800/50">
-          {filtered.length === 0 ? (
-            <div className="p-8 text-center text-zinc-500 text-sm">
-              {contacts.length === 0 ? "База контактов пуста — сначала добавь контакты в разделе Contacts" : "Ничего не найдено"}
-            </div>
-          ) : filtered.map(c => (
-            <div key={c.id}
-              className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-zinc-800/40 transition-colors ${picked.has(c.id) ? "bg-zinc-800/30" : ""}`}
-              onClick={() => togglePick(c.id)}>
-              <input type="checkbox" className="accent-blue-500 shrink-0" checked={picked.has(c.id)} readOnly />
-              <div className="min-w-0">
-                <span className="text-sm text-blue-400 font-mono">@{c.username}</span>
-                {c.display_name && <span className="text-xs text-zinc-300 ml-2">{c.display_name}</span>}
-                {(c.company || c.role) && (
-                  <span className="text-xs text-zinc-600 ml-2">
-                    {[c.company, c.role].filter(Boolean).join(" · ")}
-                  </span>
-                )}
+
+        {activeBatch && (
+          <div className="px-4 py-3 border-b border-zinc-800 shrink-0">
+            <input
+              className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500"
+              placeholder="Поиск..."
+              value={search} onChange={e => setSearch(e.target.value)}
+            />
+          </div>
+        )}
+
+        <div className="flex-1 overflow-y-auto">
+          {!activeBatch ? (
+            /* Batch list */
+            batches.length === 0 ? (
+              <div className="p-8 text-center text-zinc-500 text-sm">База контактов пуста — сначала импортируй CSV в разделе Contacts</div>
+            ) : (
+              <div className="divide-y divide-zinc-800/50">
+                {batches.map(b => (
+                  <div key={b.id} className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800/30 transition-colors">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-zinc-200 font-medium">{b.name}</p>
+                      <p className="text-xs text-zinc-500">{b.count} контактов</p>
+                    </div>
+                    <button
+                      onClick={() => selectAllBatch(b)}
+                      className="text-xs bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 px-2.5 py-1.5 rounded-lg transition-colors shrink-0">
+                      Выбрать все
+                    </button>
+                    <button
+                      onClick={() => drillIn(b)}
+                      className="text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-2.5 py-1.5 rounded-lg transition-colors shrink-0">
+                      Открыть →
+                    </button>
+                  </div>
+                ))}
               </div>
+            )
+          ) : (
+            /* Contact list inside a batch */
+            <div className="divide-y divide-zinc-800/50">
+              <div className="flex items-center gap-3 px-4 py-2 bg-zinc-800/30">
+                <button
+                  onClick={() => {
+                    const allIds = filtered.map(c => c.id);
+                    const allSelected = allIds.every(id => picked.has(id));
+                    setPicked(prev => {
+                      const n = new Set(prev);
+                      if (allSelected) allIds.forEach(id => n.delete(id));
+                      else allIds.forEach(id => n.add(id));
+                      return n;
+                    });
+                    setContacts(prev => {
+                      const existing = new Map(prev.map(c => [c.id, c]));
+                      filtered.forEach(c => existing.set(c.id, c));
+                      return [...existing.values()];
+                    });
+                  }}
+                  className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors">
+                  Выбрать всё в батче
+                </button>
+              </div>
+              {filtered.length === 0 ? (
+                <div className="p-8 text-center text-zinc-500 text-sm">Ничего не найдено</div>
+              ) : filtered.map(c => (
+                <div key={c.id}
+                  className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-zinc-800/40 transition-colors ${picked.has(c.id) ? "bg-zinc-800/30" : ""}`}
+                  onClick={() => togglePick(c)}>
+                  <input type="checkbox" className="accent-blue-500 shrink-0" checked={picked.has(c.id)} readOnly />
+                  <div className="min-w-0">
+                    <span className="text-sm text-blue-400 font-mono">@{c.username}</span>
+                    {c.display_name && <span className="text-xs text-zinc-300 ml-2">{c.display_name}</span>}
+                    {(c.company || c.role) && (
+                      <span className="text-xs text-zinc-600 ml-2">{[c.company, c.role].filter(Boolean).join(" · ")}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
+
         <div className="px-4 py-3 border-t border-zinc-800 flex items-center justify-between shrink-0">
           <span className="text-xs text-zinc-500">{picked.size} выбрано</span>
           <div className="flex gap-2">
@@ -105,6 +202,7 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
     name: "",
     account_ids: [],
     delay_min: 30, delay_max: 90, daily_limit: 20,
+    send_window_enabled: false,
     send_hour_from: 9, send_hour_to: 21,
     prompt_template_id: "",
     stop_on_reply: true,
@@ -281,19 +379,33 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
 
         {/* Time window */}
         <div>
-          <label className="text-xs font-medium text-zinc-400 block mb-1.5">
-            Окно отправки <span className="text-zinc-600 font-normal">— по Москве (UTC+3)</span>
+          <label className="flex items-center gap-2.5 cursor-pointer mb-2"
+            onClick={() => setForm(f => ({ ...f, send_window_enabled: !f.send_window_enabled }))}>
+            <div className={`relative w-8 h-4 rounded-full transition-colors shrink-0 ${form.send_window_enabled ? "bg-blue-600" : "bg-zinc-700"}`}>
+              <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all ${form.send_window_enabled ? "left-[18px]" : "left-0.5"}`} />
+            </div>
+            <span className="text-xs font-medium text-zinc-400">
+              Ограничить время отправки <span className="text-zinc-600 font-normal">— по Москве (UTC+3)</span>
+            </span>
           </label>
-          <div className="grid grid-cols-2 gap-3">
-            {[{ k: "send_hour_from", label: "С (час)" }, { k: "send_hour_to", label: "До (час)" }].map(({ k, label }) => (
-              <div key={k}>
-                <label className="text-xs text-zinc-500 block mb-1">{label}</label>
-                <input type="number" min={0} max={23} className={inputCls} value={form[k]}
-                  onChange={e => setForm({...form, [k]: Number(e.target.value)})} />
+          {form.send_window_enabled && (
+            <div>
+              <div className="grid grid-cols-2 gap-3">
+                {[{ k: "send_hour_from", label: "С (час 0–23)" }, { k: "send_hour_to", label: "До (час 0–23)" }].map(({ k, label }) => (
+                  <div key={k}>
+                    <label className="text-xs text-zinc-500 block mb-1">{label}</label>
+                    <input type="number" min={0} max={23} className={inputCls} value={form[k]}
+                      onChange={e => setForm({...form, [k]: Number(e.target.value)})} />
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-          <p className="text-[11px] text-zinc-600 mt-1">Отправка с {form.send_hour_from}:00 до {form.send_hour_to}:00 MSK</p>
+              <p className="text-[11px] text-zinc-600 mt-1">
+                {form.send_hour_from < form.send_hour_to
+                  ? `Отправка с ${form.send_hour_from}:00 до ${form.send_hour_to}:00 MSK`
+                  : `Ночная отправка: с ${form.send_hour_from}:00 до ${form.send_hour_to}:00 MSK (+1 день)`}
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Advanced / stop conditions */}
@@ -415,7 +527,8 @@ export default function Campaigns() {
                         )}
                       </div>
                       <p className="text-xs text-zinc-500 mt-0.5">
-                        {accountName(c.account_ids)} · {c.delay_min}–{c.delay_max}с · {c.daily_limit}/день · {c.send_hour_from}:00–{c.send_hour_to}:00 MSK
+                        {accountName(c.account_ids)} · {c.delay_min}–{c.delay_max}с · {c.daily_limit}/день
+                        {c.send_window_enabled && ` · ${c.send_hour_from}:00–${c.send_hour_to}:00 MSK`}
                       </p>
                     </div>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 ${st.cls}`}>{st.label}</span>

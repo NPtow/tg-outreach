@@ -25,7 +25,7 @@ def get_db():
 
 
 def init_db():
-    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact, Contact  # noqa
+    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact, Contact, ContactBatch  # noqa
     Base.metadata.create_all(bind=engine)
 
     # Add new columns to existing tables (safe to re-run — errors for existing columns are swallowed)
@@ -57,6 +57,14 @@ def init_db():
         ("conversations", "source_campaign_id INTEGER"),
         ("conversations", "unread_count INTEGER DEFAULT 0"),
         ("conversations", "is_hot INTEGER DEFAULT 0"),
+        # contacts
+        ("contacts", "batch_id INTEGER"),
+        # campaigns
+        ("campaigns", "send_window_enabled INTEGER DEFAULT 0"),
+        # settings
+        ("settings", "provider TEXT DEFAULT 'openai'"),
+        ("settings", "anthropic_key TEXT DEFAULT ''"),
+        ("settings", "base_url TEXT DEFAULT ''"),
     ]
     with engine.connect() as conn:
         for table, col_def in new_cols:

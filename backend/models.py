@@ -86,6 +86,17 @@ class Message(Base):
     conversation = relationship("Conversation", back_populates="messages")
 
 
+class ContactBatch(Base):
+    """Group of contacts imported together (one CSV upload = one batch)."""
+    __tablename__ = "contact_batches"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False)  # filename or custom label
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    contacts = relationship("Contact", back_populates="batch")
+
+
 class Contact(Base):
     """Reusable contact library. Import once, use in multiple campaigns."""
     __tablename__ = "contacts"
@@ -98,6 +109,9 @@ class Contact(Base):
     custom_note = Column(Text, nullable=True)           # {note}
     tags = Column(String(300), nullable=True)           # comma-separated tags
     created_at = Column(DateTime, default=datetime.utcnow)
+    batch_id = Column(Integer, ForeignKey("contact_batches.id"), nullable=True)
+
+    batch = relationship("ContactBatch", back_populates="contacts")
 
 
 class Campaign(Base):
@@ -113,6 +127,7 @@ class Campaign(Base):
     daily_limit = Column(Integer, default=20)
     send_hour_from = Column(Integer, default=9)
     send_hour_to = Column(Integer, default=21)
+    send_window_enabled = Column(Boolean, default=False)
     status = Column(String(20), default="draft")  # draft|running|paused|done
     created_at = Column(DateTime, default=datetime.utcnow)
     # Prompt override for auto-replies on this campaign's conversations
@@ -148,7 +163,10 @@ class Settings(Base):
     __tablename__ = "settings"
 
     id = Column(Integer, primary_key=True, default=1)
+    provider = Column(String(20), default="openai")    # openai|anthropic|ollama|lmstudio
     openai_key = Column(String(200), default="")
+    anthropic_key = Column(String(200), default="")
+    base_url = Column(String(300), default="")         # for ollama/lmstudio
     model = Column(String(50), default="gpt-4o-mini")
     system_prompt = Column(Text, default="Ты вежливый менеджер по продажам. Отвечай кратко и по делу.")
     auto_reply_enabled = Column(Boolean, default=True)

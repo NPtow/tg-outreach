@@ -64,9 +64,17 @@ export const api = {
   removeDNC: (id) => req("DELETE", `/api/dnc/${id}`),
 
   // Contacts
-  getContacts: (search) => req("GET", `/api/contacts/${search ? `?search=${encodeURIComponent(search)}` : ""}`),
+  getContactBatches: () => req("GET", "/api/contacts/batches/"),
+  deleteContactBatch: (id) => req("DELETE", `/api/contacts/batches/${id}`),
+  getContacts: (search, batch_id) => {
+    const params = new URLSearchParams();
+    if (search) params.set("search", search);
+    if (batch_id !== undefined && batch_id !== null) params.set("batch_id", batch_id);
+    const qs = params.toString();
+    return req("GET", `/api/contacts/${qs ? "?" + qs : ""}`);
+  },
   createContact: (data) => req("POST", "/api/contacts/", data),
-  importContacts: (csv_text) => req("POST", "/api/contacts/import", { csv_text }),
+  importContacts: (csv_text, batch_name = "") => req("POST", "/api/contacts/import", { csv_text, batch_name }),
   deleteContact: (id) => req("DELETE", `/api/contacts/${id}`),
   bulkDeleteContacts: (ids) => req("DELETE", "/api/contacts/bulk", { ids }),
 

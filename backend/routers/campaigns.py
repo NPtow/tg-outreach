@@ -22,6 +22,7 @@ class CampaignCreate(BaseModel):
     daily_limit: int = 20
     send_hour_from: int = 9
     send_hour_to: int = 21
+    send_window_enabled: bool = False
     prompt_template_id: Optional[int] = None
     stop_on_reply: bool = True
     stop_keywords: Optional[str] = None   # comma-separated
@@ -61,6 +62,7 @@ def list_campaigns(db: Session = Depends(get_db)):
             "daily_limit": c.daily_limit,
             "send_hour_from": c.send_hour_from,
             "send_hour_to": c.send_hour_to,
+            "send_window_enabled": bool(c.send_window_enabled),
             "prompt_template_id": c.prompt_template_id,
             "stop_on_reply": bool(c.stop_on_reply),
             "stop_keywords": c.stop_keywords or "",
@@ -94,6 +96,7 @@ def create_campaign(data: CampaignCreate, db: Session = Depends(get_db)):
         daily_limit=data.daily_limit,
         send_hour_from=data.send_hour_from,
         send_hour_to=data.send_hour_to,
+        send_window_enabled=data.send_window_enabled,
         prompt_template_id=data.prompt_template_id,
         stop_on_reply=data.stop_on_reply,
         stop_keywords=data.stop_keywords,

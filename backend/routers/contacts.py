@@ -1,13 +1,15 @@
-import io
 import csv
+import io
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import Contact
+from backend.models import Contact, ContactBatch
 
 router = APIRouter(prefix="/api/contacts", tags=["contacts"])
 
@@ -21,8 +23,9 @@ class ContactCreate(BaseModel):
     tags: Optional[str] = None
 
 
-class ContactImport(BaseModel):
-    csv_text: str  # raw CSV text: username[,name[,company[,role[,note[,tags]]]]]
+class ImportRequest(BaseModel):
+    csv_text: str
+    batch_name: str = ""
 
 
 class BulkDelete(BaseModel):
@@ -39,15 +42,51 @@ def _serialize(c: Contact) -> dict:
         "custom_note": c.custom_note,
         "tags": c.tags,
         "created_at": c.created_at,
+        "batch_id": c.batch_id,
     }
 
 
+# ── Batch endpoints ──────────────────────────────────────────────────────────
+
+@router.get("/batches/")
+def list_batches(db: Session = Depends(get_db)):
+    batches = db.query(ContactBatch).order_by(ContactBatch.created_at.desc()).all()
+    result = []
+    for b in batches:
+        count = db.query(Contact).filter(Contact.batch_id == b.id).count()
+        result.append({
+            "id": b.id,
+            "name": b.name,
+            "created_at": b.created_at,
+            "count": count,
+        })
+    return result
+
+
+@router.delete("/batches/{batch_id}")
+def delete_batch(batch_id: int, db: Session = Depends(get_db)):
+    batch = db.query(ContactBatch).filter(ContactBatch.id == batch_id).first()
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    db.query(Contact).filter(Contact.batch_id == batch_id).delete()
+    db.delete(batch)
+    db.commit()
+    return {"ok": True}
+
+
+# ── Contact endpoints ─────────────────────────────────────────────────────────
+
 @router.get("/")
-def list_contacts(search: Optional[str] = None, db: Session = Depends(get_db)):
+def list_contacts(
+    search: Optional[str] = None,
+    batch_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
     q = db.query(Contact).order_by(Contact.created_at.desc())
+    if batch_id is not None:
+        q = q.filter(Contact.batch_id == batch_id)
     if search:
         s = f"%{search.lower()}%"
-        from sqlalchemy import or_, func
         q = q.filter(
             or_(
                 func.lower(Contact.username).like(s),
@@ -71,6 +110,7 @@ def create_contact(data: ContactCreate, db: Session = Depends(get_db)):
         role=data.role or None,
         custom_note=data.custom_note or None,
         tags=data.tags or None,
+        batch_id=None,  # manual contacts have no batch
     )
     db.add(c)
     db.commit()
@@ -79,15 +119,18 @@ def create_contact(data: ContactCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/import")
-def import_contacts(data: ContactImport, db: Session = Depends(get_db)):
+def import_contacts(data: ImportRequest, db: Session = Depends(get_db)):
     """
-    Import contacts from CSV text.
+    Import contacts from CSV text grouped into a batch.
     Format: username[,display_name[,company[,role[,custom_note[,tags]]]]]
-    One contact per line. Lines starting with # are ignored.
     """
-    added = 0
-    skipped = 0
+    batch_name = data.batch_name.strip() if data.batch_name.strip() else datetime.utcnow().strftime("Import %Y-%m-%d %H:%M")
+    batch = ContactBatch(name=batch_name)
+    db.add(batch)
+    db.flush()  # get batch.id before adding contacts
+
     reader = csv.reader(io.StringIO(data.csv_text.strip()))
+    added = 0
     for row in reader:
         if not row:
             continue
@@ -102,11 +145,13 @@ def import_contacts(data: ContactImport, db: Session = Depends(get_db)):
             role=parts[3] if len(parts) > 3 and parts[3] else None,
             custom_note=parts[4] if len(parts) > 4 and parts[4] else None,
             tags=parts[5] if len(parts) > 5 and parts[5] else None,
+            batch_id=batch.id,
         )
         db.add(c)
         added += 1
+
     db.commit()
-    return {"added": added, "skipped": skipped}
+    return {"added": added, "batch_id": batch.id, "batch_name": batch_name}
 
 
 @router.delete("/bulk")

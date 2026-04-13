@@ -145,7 +145,10 @@ async def _handle_message(account_id: int, event):
             return
         if not settings or not settings.auto_reply_enabled:
             return
-        if not settings.openai_key:
+        provider = getattr(settings, "provider", "openai") or "openai"
+        if provider == "openai" and not settings.openai_key:
+            return
+        if provider == "anthropic" and not getattr(settings, "anthropic_key", ""):
             return
 
         tg_user_id = str(sender.id)
@@ -309,7 +312,10 @@ async def _handle_message(account_id: int, event):
 
         from backend.gpt_handler import generate_reply
         reply = await generate_reply(
-            openai_key=settings.openai_key,
+            provider=getattr(settings, "provider", "openai") or "openai",
+            openai_key=settings.openai_key or "",
+            anthropic_key=getattr(settings, "anthropic_key", "") or "",
+            base_url=getattr(settings, "base_url", "") or "",
             model=settings.model,
             system_prompt=system_prompt,
             history=history,
@@ -512,14 +518,29 @@ def campaign_is_running(campaign_id: int) -> bool:
 
 
 def _seconds_until_window_open(hour_from: int, hour_to: int) -> int:
+    """Return seconds until send window opens (0 = currently inside window).
+    Supports wrap-around: hour_from=22, hour_to=6 means 22:00-06:00 (night shift).
+    """
     now_msk = datetime.utcnow() + _MSK_OFFSET
-    current_hour = now_msk.hour
-    if hour_from <= current_hour < hour_to:
-        return 0
-    if current_hour < hour_from:
-        target = now_msk.replace(hour=hour_from, minute=0, second=0, microsecond=0)
+    h = now_msk.hour
+
+    if hour_from == hour_to:
+        return 0  # no restriction effectively
+
+    if hour_from < hour_to:
+        # Normal range, e.g. 9-21
+        in_window = hour_from <= h < hour_to
     else:
-        target = (now_msk + timedelta(days=1)).replace(hour=hour_from, minute=0, second=0, microsecond=0)
+        # Wrap-around range, e.g. 22-06 (night): in window if h >= 22 or h < 6
+        in_window = h >= hour_from or h < hour_to
+
+    if in_window:
+        return 0
+
+    # Calculate seconds until hour_from (today or tomorrow)
+    target = now_msk.replace(hour=hour_from, minute=0, second=0, microsecond=0)
+    if target <= now_msk:
+        target += timedelta(days=1)
     return max(0, int((target - now_msk).total_seconds()))
 
 
@@ -550,14 +571,15 @@ async def _campaign_worker(campaign_id: int):
                     break
 
                 # ── Time window check (MSK) ──
-                wait_secs = _seconds_until_window_open(
-                    campaign.send_hour_from, campaign.send_hour_to
-                )
-                if wait_secs > 0:
-                    logger.info(f"Campaign {campaign_id}: outside send window, sleeping {wait_secs}s")
-                    db.close()
-                    await asyncio.sleep(wait_secs)
-                    continue
+                if campaign.send_window_enabled:
+                    wait_secs = _seconds_until_window_open(
+                        campaign.send_hour_from, campaign.send_hour_to
+                    )
+                    if wait_secs > 0:
+                        logger.info(f"Campaign {campaign_id}: outside send window, sleeping {wait_secs}s")
+                        db.close()
+                        await asyncio.sleep(wait_secs)
+                        continue
 
                 # ── Daily limit check ──
                 today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
