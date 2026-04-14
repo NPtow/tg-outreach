@@ -34,6 +34,7 @@ def init_db():
         # accounts
         ("accounts", "session_string TEXT"),
         ("accounts", "needs_reauth INTEGER DEFAULT 0"),
+        ("accounts", "tdata_blob TEXT"),
         ("accounts", "proxy_host TEXT"),
         ("accounts", "proxy_port INTEGER"),
         ("accounts", "proxy_type TEXT"),

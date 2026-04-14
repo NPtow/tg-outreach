@@ -2,10 +2,14 @@
 Telethon client manager + Campaign worker.
 """
 import asyncio
+import base64
 import json
 import logging
 import os
 import random
+import shutil
+import tempfile
+import zipfile
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 
@@ -360,6 +364,64 @@ async def _handle_message(account_id: int, event):
         db.close()
 
 
+async def _try_recover_from_tdata(account_id: int) -> Optional[str]:
+    """Re-derive a fresh session_string from stored tdata using CreateNewSession.
+    tdata's original auth key (KEY_A) stays intact; service gets a new independent key (KEY_C).
+    Returns new session_string on success, None if recovery impossible."""
+    db = SessionLocal()
+    try:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        if not acc or not getattr(acc, "tdata_blob", None):
+            logger.info(f"Account {account_id}: no tdata_blob stored, cannot auto-recover")
+            return None
+
+        zip_bytes = base64.b64decode(acc.tdata_blob)
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            zip_path = os.path.join(tmp_dir, "tdata.zip")
+            with open(zip_path, "wb") as f:
+                f.write(zip_bytes)
+            with zipfile.ZipFile(zip_path) as z:
+                z.extractall(tmp_dir)
+
+            tdata_path = None
+            for root, _dirs, files in os.walk(tmp_dir):
+                if "key_datas" in files:
+                    tdata_path = root
+                    break
+            if not tdata_path:
+                logger.error(f"Account {account_id}: tdata recovery — key_datas not found in zip")
+                return None
+
+            proxy = _build_proxy(acc)
+            from opentele.td import TDesktop
+            from opentele.api import CreateNewSession
+
+            tdesk = TDesktop(tdata_path)
+            client = await tdesk.ToTelethon(
+                session=StringSession(), flag=CreateNewSession, proxy=proxy
+            )
+            await client.connect()
+            authorized = await client.is_user_authorized()
+            session_str = client.session.save() if authorized else None
+            await client.disconnect()
+
+            if session_str:
+                acc.session_string = session_str
+                db.commit()
+                logger.info(f"Account {account_id}: session successfully recovered from tdata")
+                return session_str
+            logger.warning(f"Account {account_id}: tdata recovery — not authorized after conversion")
+            return None
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    except Exception as e:
+        logger.error(f"Account {account_id}: tdata recovery failed: {e}", exc_info=True)
+        return None
+    finally:
+        db.close()
+
+
 async def _set_needs_reauth(account_id: int, value: bool):
     db = SessionLocal()
     try:
@@ -371,7 +433,7 @@ async def _set_needs_reauth(account_id: int, value: bool):
         db.close()
 
 
-async def start_client(account: Account) -> bool:
+async def start_client(account: Account, _tdata_retried: bool = False) -> bool:
     if account.id in _clients:
         return True
 
@@ -381,6 +443,11 @@ async def start_client(account: Account) -> bool:
         if not await client.is_user_authorized():
             logger.warning(f"Account {account.id} session expired — needs re-auth")
             await client.disconnect()
+            if not _tdata_retried and getattr(account, "tdata_blob", None):
+                recovered = await _try_recover_from_tdata(account.id)
+                if recovered:
+                    account.session_string = recovered
+                    return await start_client(account, _tdata_retried=True)
             await _set_needs_reauth(account.id, True)
             return False
 
@@ -402,6 +469,11 @@ async def start_client(account: Account) -> bool:
     except (AuthKeyDuplicatedError, AuthKeyUnregisteredError, UserDeactivatedBanError) as e:
         logger.error(f"Auth key invalid for account {account.id}: {e}")
         await client.disconnect()
+        if not _tdata_retried and getattr(account, "tdata_blob", None):
+            recovered = await _try_recover_from_tdata(account.id)
+            if recovered:
+                account.session_string = recovered
+                return await start_client(account, _tdata_retried=True)
         await _set_needs_reauth(account.id, True)
         return False
     except Exception as e:

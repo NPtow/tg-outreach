@@ -45,6 +45,7 @@ class Account(Base):
     proxy_user = Column(String(100), nullable=True)
     proxy_pass = Column(String(100), nullable=True)
     needs_reauth = Column(Boolean, default=False)  # True when Telegram invalidated the session
+    tdata_blob = Column(Text, nullable=True)        # base64-encoded tdata .zip — master credential for auto-recovery
     # Custom prompt for this account (overrides global Settings.system_prompt)
     prompt_template_id = Column(Integer, ForeignKey("prompt_templates.id"), nullable=True)
 

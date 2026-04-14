@@ -288,7 +288,10 @@ export default function Accounts() {
                     <div className={`w-2 h-2 rounded-full shrink-0 ${acc.is_active ? "bg-emerald-500" : "bg-zinc-600"}`} />
                     <div>
                       <p className="text-sm font-medium text-zinc-100">{acc.name}</p>
-                      <p className="text-xs text-zinc-500">{acc.phone}</p>
+                      <p className="text-xs text-zinc-500">
+                        {acc.phone}
+                        {acc.tdata_stored && <span className="ml-1.5 text-[10px] text-emerald-400/70">tdata ✓</span>}
+                      </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 flex-wrap justify-end">

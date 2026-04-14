@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 import shutil
@@ -48,6 +49,7 @@ def list_accounts(db: Session = Depends(get_db)):
             "is_active": tg.is_running(a.id),
             "auto_reply": a.auto_reply,
             "needs_reauth": bool(getattr(a, "needs_reauth", False)),
+            "tdata_stored": bool(getattr(a, "tdata_blob", None)),
             "prompt_template_id": a.prompt_template_id,
             "created_at": a.created_at,
         }
@@ -207,13 +209,16 @@ async def import_tdata(
 
         # Convert tdata → Telethon StringSession via opentele
         from opentele.td import TDesktop
-        from opentele.api import UseCurrentSession
+        from opentele.api import CreateNewSession
         from telethon.sessions import StringSession
 
         tdesk = TDesktop(tdata_path)
+        # CreateNewSession — creates an INDEPENDENT auth key for the service.
+        # tdata's original key (KEY_A) stays alive; service gets its own key (KEY_B).
+        # If KEY_B dies, _try_recover_from_tdata() uses KEY_A to create KEY_C automatically.
         client = await tdesk.ToTelethon(
             session=StringSession(),
-            flag=UseCurrentSession,
+            flag=CreateNewSession,
             proxy=proxy,
         )
         await client.connect()
@@ -227,6 +232,9 @@ async def import_tdata(
             raise HTTPException(400, "Account not authorized after tdata conversion")
 
         acc.session_string = session_str
+        # Store tdata zip as base64 — used for automatic session recovery without phone code
+        with open(zip_path, "rb") as f:
+            acc.tdata_blob = base64.b64encode(f.read()).decode("utf-8")
         db.commit()
 
         # Start the live client
