@@ -115,8 +115,10 @@ async def reconnect_account(account_id: int, db: Session = Depends(get_db)):
         acc.is_active = True
         db.commit()
         return {"ok": True}
+    # Re-read from DB — _set_needs_reauth uses its own session so acc object is stale
+    db.refresh(acc)
     needs_reauth = bool(getattr(acc, "needs_reauth", False))
-    return {"ok": False, "needs_reauth": needs_reauth, "error": "Session expired — re-authorization required" if needs_reauth else "Connection failed"}
+    raise HTTPException(400, "Сессия истекла — требуется повторная авторизация" if needs_reauth else "Не удалось подключиться к Telegram")
 
 
 @router.post("/{account_id}/toggle-reply")

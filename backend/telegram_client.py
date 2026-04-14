@@ -16,6 +16,9 @@ from telethon.errors import (
     UserPrivacyRestrictedError,
     UsernameNotOccupiedError,
     UsernameInvalidError,
+    AuthKeyDuplicatedError,
+    AuthKeyUnregisteredError,
+    UserDeactivatedBanError,
 )
 from telethon.sessions import StringSession
 from telethon.tl.types import User
@@ -396,6 +399,11 @@ async def start_client(account: Account) -> bool:
 
         logger.info(f"Started client for account {acc_id} ({account.phone})")
         return True
+    except (AuthKeyDuplicatedError, AuthKeyUnregisteredError, UserDeactivatedBanError) as e:
+        logger.error(f"Auth key invalid for account {account.id}: {e}")
+        await client.disconnect()
+        await _set_needs_reauth(account.id, True)
+        return False
     except Exception as e:
         logger.error(f"Failed to start client {account.id}: {e}")
         await client.disconnect()

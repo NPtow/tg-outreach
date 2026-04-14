@@ -230,6 +230,7 @@ export default function Accounts() {
   const [showTdata, setShowTdata] = useState(false);
   const [reauthAccount, setReauthAccount] = useState(null);
   const [reconnecting, setReconnecting] = useState({});
+  const [reconnectError, setReconnectError] = useState({});
 
   const load = () => api.getAccounts().then(setAccounts);
 
@@ -245,8 +246,12 @@ export default function Accounts() {
 
   const handleReconnect = async (accId) => {
     setReconnecting(r => ({ ...r, [accId]: true }));
+    setReconnectError(e => ({ ...e, [accId]: null }));
     try {
       await api.reconnectAccount(accId);
+      load();
+    } catch (e) {
+      setReconnectError(r => ({ ...r, [accId]: e.message }));
       load();
     } finally {
       setReconnecting(r => ({ ...r, [accId]: false }));
@@ -312,6 +317,11 @@ export default function Accounts() {
                         {reconnecting[acc.id] ? "Подключаю..." : "↺ Переподключить"}
                       </button>
                     ) : null}
+                    {reconnectError[acc.id] && (
+                      <span className="text-xs text-red-400 bg-red-500/10 px-2 py-1 rounded-lg max-w-[200px] truncate" title={reconnectError[acc.id]}>
+                        {reconnectError[acc.id]}
+                      </span>
+                    )}
                     <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer select-none">
                       <div className={`relative w-8 h-4 rounded-full transition-colors ${acc.auto_reply ? "bg-blue-600" : "bg-zinc-700"}`}
                         onClick={() => api.toggleReply(acc.id).then(load)}>
