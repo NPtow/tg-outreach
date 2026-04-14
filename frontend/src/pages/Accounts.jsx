@@ -301,6 +301,11 @@ export default function Accounts() {
                         className="text-xs bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded-lg font-medium transition-colors">
                         Авторизовать
                       </button>
+                    ) : acc.is_active ? (
+                      <button onClick={() => api.saveSession(acc.id).then(() => alert('Сессия сохранена ✓'))}
+                        className="text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-300 px-3 py-1.5 rounded-lg font-medium transition-colors">
+                        💾 Сохранить сессию
+                      </button>
                     ) : !acc.is_active ? (
                       <button onClick={() => handleReconnect(acc.id)} disabled={reconnecting[acc.id]}
                         className="text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-300 px-3 py-1.5 rounded-lg font-medium transition-colors disabled:opacity-50">

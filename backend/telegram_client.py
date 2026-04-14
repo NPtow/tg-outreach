@@ -81,6 +81,16 @@ async def _save_session_string(account_id: int, client: TelegramClient):
         db.close()
 
 
+async def save_session_now(account_id: int) -> bool:
+    """Explicitly flush the current in-memory session to DB. Called from /save-session endpoint."""
+    client = _clients.get(account_id)
+    if not client:
+        return False
+    await _save_session_string(account_id, client)
+    logger.info(f"Session saved for account {account_id}")
+    return True
+
+
 def _resolve_prompt(settings: Settings, account: Account, campaign: Optional[Campaign]) -> str:
     """
     Resolve the active system prompt with priority:

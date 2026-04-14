@@ -19,6 +19,7 @@ export const api = {
   createAccount: (data) => req("POST", "/api/accounts/", data),
   sendCode: (account_id) => req("POST", "/api/accounts/send-code", { account_id }),
   verifyCode: (data) => req("POST", "/api/accounts/verify-code", data),
+  saveSession: (id) => req("POST", `/api/accounts/${id}/save-session`),
   reconnectAccount: (id) => req("POST", `/api/accounts/${id}/reconnect`),
   toggleReply: (id) => req("POST", `/api/accounts/${id}/toggle-reply`),
   setPrompt: (id, prompt_template_id) => req("POST", `/api/accounts/${id}/set-prompt`, { prompt_template_id }),

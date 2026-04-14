@@ -95,6 +95,14 @@ async def verify_code(data: VerifyCodeRequest, db: Session = Depends(get_db)):
     return result
 
 
+@router.post("/{account_id}/save-session")
+async def save_session(account_id: int, db: Session = Depends(get_db)):
+    ok = await tg.save_session_now(account_id)
+    if not ok:
+        raise HTTPException(400, "Account is not connected")
+    return {"ok": True}
+
+
 @router.post("/{account_id}/reconnect")
 async def reconnect_account(account_id: int, db: Session = Depends(get_db)):
     acc = db.query(Account).filter(Account.id == account_id).first()
