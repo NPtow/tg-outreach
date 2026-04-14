@@ -91,9 +91,8 @@ def init_db():
             except Exception:
                 conn.rollback()  # PostgreSQL requires rollback after error before next statement
 
-    # For PostgreSQL: convert INTEGER boolean columns to proper BOOLEAN type.
-    # These were originally added via ADD COLUMN ... INTEGER, causing comparison errors.
-    # Safe to re-run — ALTER on already-BOOLEAN column will fail silently.
+    # For PostgreSQL: convert legacy INTEGER boolean columns to proper BOOLEAN type.
+    # Safe to re-run because we first inspect the current column type.
     if not DATABASE_URL.startswith("sqlite"):
         bool_cols = [
             ("conversations", "is_hot"),
@@ -106,10 +105,33 @@ def init_db():
         with engine.connect() as conn:
             for table, col in bool_cols:
                 try:
-                    conn.execute(text(
-                        f"ALTER TABLE {table} ALTER COLUMN {col} TYPE BOOLEAN USING {col}::boolean"
-                    ))
-                    conn.commit()
+                    data_type = conn.execute(
+                        text(
+                            """
+                            SELECT data_type
+                            FROM information_schema.columns
+                            WHERE table_name = :table AND column_name = :column
+                            """
+                        ),
+                        {"table": table, "column": col},
+                    ).scalar()
+                    if data_type in {"integer", "smallint", "bigint"}:
+                        conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {col} DROP DEFAULT"))
+                        conn.execute(
+                            text(
+                                f"""
+                                ALTER TABLE {table}
+                                ALTER COLUMN {col} TYPE BOOLEAN
+                                USING CASE
+                                    WHEN {col} IS NULL THEN NULL
+                                    WHEN {col} = 0 THEN FALSE
+                                    ELSE TRUE
+                                END
+                                """
+                            )
+                        )
+                        conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {col} SET DEFAULT FALSE"))
+                        conn.commit()
                 except Exception:
                     conn.rollback()
 
