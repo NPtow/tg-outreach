@@ -23,10 +23,11 @@ function Field({ label, hint, children }) {
 const inputCls = "w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 transition-colors";
 
 const PROVIDERS = [
-  { value: "openai",    label: "OpenAI (GPT)" },
-  { value: "anthropic", label: "Anthropic (Claude)" },
-  { value: "ollama",    label: "Ollama (локальная)" },
-  { value: "lmstudio",  label: "LM Studio (локальная)" },
+  { value: "openai",      label: "OpenAI (GPT)" },
+  { value: "openrouter",  label: "OpenRouter (350+ моделей)" },
+  { value: "anthropic",   label: "Anthropic (Claude)" },
+  { value: "ollama",      label: "Ollama (локальная)" },
+  { value: "lmstudio",    label: "LM Studio (локальная)" },
 ];
 
 const OPENAI_MODELS = [
@@ -96,6 +97,23 @@ export default function Settings() {
                 {OPENAI_MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
               </select>
             </Field>
+          </>
+        )}
+
+        {/* OpenRouter */}
+        {form.provider === "openrouter" && (
+          <>
+            <Field label="OpenRouter API Key" hint="Получи на openrouter.ai → Keys">
+              <input type="password" className={inputCls} placeholder="sk-or-v1-..." value={form.openai_key}
+                onChange={e => set("openai_key", e.target.value)} />
+            </Field>
+            <Field label="Модель" hint="Формат: provider/model-name, например meta-llama/llama-3.3-70b-instruct:free">
+              <input className={inputCls} placeholder="meta-llama/llama-3.3-70b-instruct:free" value={form.model}
+                onChange={e => set("model", e.target.value)} />
+            </Field>
+            <div className="bg-zinc-800/50 border border-zinc-700/50 rounded-lg px-4 py-3">
+              <p className="text-xs text-zinc-400">Бесплатные модели: <span className="text-zinc-200">meta-llama/llama-3.3-70b-instruct:free</span>, <span className="text-zinc-200">mistralai/mistral-7b-instruct:free</span>, <span className="text-zinc-200">google/gemma-3-27b-it:free</span></p>
+            </div>
           </>
         )}
 

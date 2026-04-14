@@ -35,49 +35,49 @@ class CampaignCreate(BaseModel):
 
 @router.get("/")
 def list_campaigns(db: Session = Depends(get_db)):
-    campaigns = db.query(Campaign).order_by(Campaign.created_at.desc()).all()
-    result = []
-    for c in campaigns:
-        total = db.query(CampaignTarget).filter(CampaignTarget.campaign_id == c.id).count()
-        sent = db.query(CampaignTarget).filter(
-            CampaignTarget.campaign_id == c.id, CampaignTarget.status == "sent"
-        ).count()
-        failed = db.query(CampaignTarget).filter(
-            CampaignTarget.campaign_id == c.id, CampaignTarget.status == "failed"
-        ).count()
-        skipped = db.query(CampaignTarget).filter(
-            CampaignTarget.campaign_id == c.id, CampaignTarget.status == "skipped"
-        ).count()
-        # Resolve account_ids list
-        if c.account_ids:
-            acc_ids = json.loads(c.account_ids)
-        else:
-            acc_ids = [c.account_id]
-        result.append({
-            "id": c.id,
-            "name": c.name,
-            "account_id": c.account_id,
-            "account_ids": acc_ids,
-            "status": c.status,
-            "is_running": tg.campaign_is_running(c.id),
-            "delay_min": c.delay_min,
-            "delay_max": c.delay_max,
-            "daily_limit": c.daily_limit,
-            "send_hour_from": c.send_hour_from,
-            "send_hour_to": c.send_hour_to,
-            "send_window_enabled": bool(c.send_window_enabled),
-            "prompt_template_id": c.prompt_template_id,
-            "stop_on_reply": bool(c.stop_on_reply),
-            "stop_keywords": c.stop_keywords or "",
-            "hot_keywords": c.hot_keywords or "",
-            "max_messages": c.max_messages,
-            "total": total,
-            "sent": sent,
-            "failed": failed,
-            "skipped": skipped,
-            "created_at": c.created_at,
-        })
-    return result
+    try:
+        campaigns = db.query(Campaign).order_by(Campaign.created_at.desc()).all()
+        result = []
+        for c in campaigns:
+            total = db.query(CampaignTarget).filter(CampaignTarget.campaign_id == c.id).count()
+            sent = db.query(CampaignTarget).filter(
+                CampaignTarget.campaign_id == c.id, CampaignTarget.status == "sent"
+            ).count()
+            failed = db.query(CampaignTarget).filter(
+                CampaignTarget.campaign_id == c.id, CampaignTarget.status == "failed"
+            ).count()
+            skipped = db.query(CampaignTarget).filter(
+                CampaignTarget.campaign_id == c.id, CampaignTarget.status == "skipped"
+            ).count()
+            acc_ids = json.loads(c.account_ids) if c.account_ids else [c.account_id]
+            result.append({
+                "id": c.id,
+                "name": c.name,
+                "account_id": c.account_id,
+                "account_ids": acc_ids,
+                "status": c.status,
+                "is_running": tg.campaign_is_running(c.id),
+                "delay_min": c.delay_min,
+                "delay_max": c.delay_max,
+                "daily_limit": c.daily_limit,
+                "send_hour_from": c.send_hour_from,
+                "send_hour_to": c.send_hour_to,
+                "send_window_enabled": bool(c.send_window_enabled),
+                "prompt_template_id": c.prompt_template_id,
+                "stop_on_reply": bool(c.stop_on_reply),
+                "stop_keywords": c.stop_keywords or "",
+                "hot_keywords": c.hot_keywords or "",
+                "max_messages": c.max_messages,
+                "total": total,
+                "sent": sent,
+                "failed": failed,
+                "skipped": skipped,
+                "created_at": c.created_at,
+            })
+        return result
+    except Exception as e:
+        logger.error(f"list_campaigns failed: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
 
 
 @router.post("/")

@@ -146,7 +146,7 @@ async def _handle_message(account_id: int, event):
         if not settings or not settings.auto_reply_enabled:
             return
         provider = getattr(settings, "provider", "openai") or "openai"
-        if provider == "openai" and not settings.openai_key:
+        if provider in ("openai", "openrouter") and not settings.openai_key:
             return
         if provider == "anthropic" and not getattr(settings, "anthropic_key", ""):
             return

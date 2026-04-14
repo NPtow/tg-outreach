@@ -18,7 +18,7 @@ async def generate_reply(
     if provider == "anthropic":
         return await _anthropic_reply(anthropic_key, model, system_prompt, history)
     else:
-        # openai-compatible: openai, ollama, lmstudio
+        # openai-compatible: openai, openrouter, ollama, lmstudio
         return await _openai_compatible_reply(provider, openai_key, base_url, model, system_prompt, history)
 
 
@@ -50,15 +50,22 @@ async def _openai_compatible_reply(
     try:
         from openai import AsyncOpenAI
 
-        # Determine base URL for local providers
+        # Determine base URL per provider
         if not base_url:
             if provider == "ollama":
                 base_url = "http://localhost:11434/v1"
             elif provider == "lmstudio":
                 base_url = "http://localhost:1234/v1"
+            elif provider == "openrouter":
+                base_url = "https://openrouter.ai/api/v1"
 
-        # Local providers don't need a real API key
-        api_key = openai_key if provider == "openai" else (openai_key or "local")
+        # Key selection
+        if provider == "openrouter":
+            api_key = openai_key  # openrouter key stored in openai_key field
+        elif provider == "openai":
+            api_key = openai_key
+        else:
+            api_key = openai_key or "local"
 
         kwargs = {"api_key": api_key}
         if base_url:
