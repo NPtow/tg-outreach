@@ -14,11 +14,11 @@
 
 ## In Progress
 - Confirm end-to-end deploy wiring for Railway `web` + `worker`
-- Confirm runtime env setup for app token, worker token, and encryption key
+- Add account-level username-resolution restriction check so public handles are not misclassified as dead targets
 
 ## Next
-- Configure Railway services with separate roles
 - Run a live smoke test with one real account and proxy
+- Verify campaign behavior when a public username exists but the account cannot resolve it
 - Verify campaign preflight against healthy and unhealthy accounts
 
 ## Decisions

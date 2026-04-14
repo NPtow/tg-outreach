@@ -12,6 +12,7 @@
 - [x] Update public API for account health, proxy test, runtime status, and safe campaign start.
 - [x] Update frontend for account health, proxy management, worker status, and structured campaign failures.
 - [~] Validate build/runtime flows and document deploy assumptions for Railway `web` + `worker`.
+- [~] Add username-resolution restriction detection so campaigns block restricted accounts instead of falsely failing valid public usernames.
 
 ## Validation Assumptions
 - Backend syntax: `python3 -m compileall backend`

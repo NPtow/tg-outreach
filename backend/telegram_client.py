@@ -14,6 +14,7 @@ import zipfile
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 
+import httpx
 from telethon import TelegramClient, events
 from telethon.errors import (
     FloodWaitError,
@@ -49,6 +50,7 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 _ws_broadcast = None
 _MSK_OFFSET = timedelta(hours=3)
+_USERNAME_PAGE_CACHE: Dict[str, tuple[float, bool]] = {}
 
 
 def set_ws_broadcast(fn):
@@ -109,6 +111,8 @@ def _compute_eligibility(account: Account) -> str:
         "recovery_failed",
     }:
         return "blocked_auth"
+    if (account.last_error_code or "") == "USERNAME_RESOLUTION_RESTRICTED":
+        return "blocked_resolution"
     if (account.connection_state or "offline") == "online":
         return "eligible"
     return "blocked_auth"
@@ -170,6 +174,40 @@ def _clear_error(account_id: int, **extra) -> dict:
         last_error_at=None,
         **extra,
     )
+
+
+async def _public_username_exists(username: Optional[str]) -> Optional[bool]:
+    normalized = (username or "").strip().lstrip("@")
+    if not normalized:
+        return False
+
+    now = time.time()
+    cached = _USERNAME_PAGE_CACHE.get(normalized.lower())
+    if cached and now - cached[0] < 600:
+        return cached[1]
+
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            response = await client.get(f"https://t.me/{normalized}")
+        html = response.text
+        exists = "tgme_action_button_new" in html and "Telegram – a new era of messaging" not in html
+        _USERNAME_PAGE_CACHE[normalized.lower()] = (now, exists)
+        return exists
+    except Exception as exc:
+        logger.warning("Public username check failed for %s: %s", normalized, exc)
+        return None
+
+
+def _mark_username_resolution_restricted(account_id: int, username: str) -> dict:
+    health = _mark_error(
+        account_id,
+        "USERNAME_RESOLUTION_RESTRICTED",
+        f"Public username @{username.lstrip('@')} exists, but this account cannot resolve it via Telegram API",
+        connection_state="online",
+    )
+    if _ws_broadcast:
+        asyncio.create_task(_ws_broadcast({"event": "account_health", "account_id": account_id, "health": health}))
+    return health
 
 
 def _warmup_daily_cap(account: Account) -> int:
@@ -1259,6 +1297,37 @@ async def _campaign_worker(campaign_id: int):
                     db.commit()
                     continue
                 except (UserPrivacyRestrictedError, UsernameNotOccupiedError, UsernameInvalidError) as e:
+                    public_exists = None
+                    if isinstance(e, (UsernameNotOccupiedError, UsernameInvalidError)):
+                        public_exists = await _public_username_exists(target.username)
+
+                    if public_exists:
+                        target.error = (
+                            f"Public username @{target.username} exists, but account {_account_id} "
+                            "cannot resolve it via Telegram API"
+                        )
+                        _mark_username_resolution_restricted(_account_id, target.username)
+
+                        still_eligible = False
+                        db.expire_all()
+                        for aid in acc_ids:
+                            if aid not in _clients:
+                                continue
+                            candidate = db.query(Account).filter(Account.id == aid).first()
+                            if candidate and _compute_eligibility(candidate) == "eligible":
+                                still_eligible = True
+                                break
+                        if not still_eligible:
+                            campaign.status = "paused"
+                        logger.warning(
+                            "Campaign %s: account %s cannot resolve public username %s",
+                            campaign_id,
+                            _account_id,
+                            target.username,
+                        )
+                        db.commit()
+                        continue
+
                     target.status = "failed"
                     target.error = str(e)
                     logger.warning(f"Campaign {campaign_id}: permanent error for {target.username}: {e}")

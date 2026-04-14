@@ -7,6 +7,7 @@
 - Expired session without recovery path yields `reauth_required`
 - Campaign start returns structured blocked reasons when no eligible accounts exist
 - Campaign continues using healthy accounts while quarantining risky ones
+- Campaign pauses or blocks an account when Telegram cannot resolve a publicly existing username
 - Web UI works against same-origin API and configurable WebSocket URL
 - Settings API does not return secret values
 

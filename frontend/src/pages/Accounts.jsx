@@ -25,6 +25,7 @@ const STATE_META = {
   blocked_auth: { label: "Blocked by auth", cls: "bg-amber-500/10 text-amber-400" },
   blocked_quarantine: { label: "Blocked by quarantine", cls: "bg-red-500/10 text-red-400" },
   blocked_warmup: { label: "Blocked by warmup", cls: "bg-blue-500/10 text-blue-400" },
+  blocked_resolution: { label: "Blocked by resolve", cls: "bg-orange-500/10 text-orange-400" },
 };
 
 function fmtTs(value) {
