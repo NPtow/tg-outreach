@@ -33,7 +33,7 @@ class Account(Base):
     name = Column(String(100), nullable=False)
     phone = Column(String(20), unique=True, nullable=False)
     app_id = Column(String(50), nullable=False)
-    app_hash = Column(String(100), nullable=False)
+    app_hash = Column(Text, nullable=False)
     session_file = Column(String(200))
     session_string = Column(Text, nullable=True)
     is_active = Column(Boolean, default=False)
@@ -43,9 +43,23 @@ class Account(Base):
     proxy_port = Column(Integer, nullable=True)
     proxy_type = Column(String(10), nullable=True)
     proxy_user = Column(String(100), nullable=True)
-    proxy_pass = Column(String(100), nullable=True)
+    proxy_pass = Column(Text, nullable=True)
     needs_reauth = Column(Boolean, default=False)  # True when Telegram invalidated the session
     tdata_blob = Column(Text, nullable=True)        # base64-encoded tdata .zip — master credential for auto-recovery
+    connection_state = Column(String(30), default="offline")
+    proxy_state = Column(String(30), default="unknown")
+    session_state = Column(String(30), default="missing")
+    eligibility_state = Column(String(30), default="blocked_auth")
+    last_error_code = Column(String(50), nullable=True)
+    last_error_message = Column(Text, nullable=True)
+    last_error_at = Column(DateTime, nullable=True)
+    last_proxy_check_at = Column(DateTime, nullable=True)
+    last_connect_at = Column(DateTime, nullable=True)
+    last_seen_online_at = Column(DateTime, nullable=True)
+    quarantine_until = Column(DateTime, nullable=True)
+    warmup_level = Column(Integer, default=0)
+    session_source = Column(String(30), nullable=True)
+    proxy_last_rtt_ms = Column(Integer, nullable=True)
     # Custom prompt for this account (overrides global Settings.system_prompt)
     prompt_template_id = Column(Integer, ForeignKey("prompt_templates.id"), nullable=True)
 
@@ -149,6 +163,7 @@ class CampaignTarget(Base):
 
     id = Column(Integer, primary_key=True)
     campaign_id = Column(Integer, ForeignKey("campaigns.id"), nullable=False)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
     username = Column(String(100), nullable=False)
     display_name = Column(String(100), nullable=True)   # {first_name}
     company = Column(String(200), nullable=True)        # {company}
@@ -166,10 +181,19 @@ class Settings(Base):
 
     id = Column(Integer, primary_key=True, default=1)
     provider = Column(String(20), default="openai")    # openai|anthropic|ollama|lmstudio
-    openai_key = Column(String(200), default="")
-    anthropic_key = Column(String(200), default="")
+    openai_key = Column(Text, default="")
+    anthropic_key = Column(Text, default="")
     base_url = Column(String(300), default="")         # for ollama/lmstudio
     model = Column(String(50), default="gpt-4o-mini")
     system_prompt = Column(Text, default="Ты вежливый менеджер по продажам. Отвечай кратко и по делу.")
     auto_reply_enabled = Column(Boolean, default=True)
     context_messages = Column(Integer, default=10)
+
+
+class RuntimeEvent(Base):
+    __tablename__ = "runtime_events"
+
+    id = Column(Integer, primary_key=True)
+    event_type = Column(String(50), nullable=False, default="runtime")
+    payload = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)

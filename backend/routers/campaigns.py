@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from backend.database import get_db
 from backend.models import Campaign, CampaignTarget
+from backend.runtime_config import owns_telegram_runtime
+from backend.worker_client import forward_to_worker
 import backend.telegram_client as tg
 
 logger = logging.getLogger(__name__)
@@ -56,7 +58,7 @@ def list_campaigns(db: Session = Depends(get_db)):
                 "account_id": c.account_id,
                 "account_ids": acc_ids,
                 "status": c.status,
-                "is_running": tg.campaign_is_running(c.id),
+                "is_running": c.status == "running",
                 "delay_min": c.delay_min,
                 "delay_max": c.delay_max,
                 "daily_limit": c.daily_limit,
@@ -139,14 +141,13 @@ async def start_campaign(campaign_id: int, db: Session = Depends(get_db)):
         c = db.query(Campaign).filter(Campaign.id == campaign_id).first()
         if not c:
             raise HTTPException(404, "Campaign not found")
-        account_ids = json.loads(c.account_ids) if c.account_ids else [c.account_id]
-        connected = [aid for aid in account_ids if tg.is_running(aid)]
-        if not connected:
-            raise HTTPException(400, f"No accounts connected (account_ids={account_ids})")
-        c.status = "running"
-        db.commit()
-        await tg.start_campaign(campaign_id)
-        return {"ok": True}
+        if owns_telegram_runtime():
+            result = await tg.preflight_and_start_campaign(campaign_id)
+        else:
+            result = await forward_to_worker("POST", f"/internal/runtime/campaigns/{campaign_id}/start")
+        if not result.get("ok"):
+            raise HTTPException(400, result)
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -159,8 +160,10 @@ async def pause_campaign(campaign_id: int, db: Session = Depends(get_db)):
     c = db.query(Campaign).filter(Campaign.id == campaign_id).first()
     if not c:
         raise HTTPException(404, "Campaign not found")
-    await tg.stop_campaign(campaign_id)
-    return {"ok": True}
+    if owns_telegram_runtime():
+        await tg.stop_campaign(campaign_id)
+        return {"ok": True}
+    return await forward_to_worker("POST", f"/internal/runtime/campaigns/{campaign_id}/pause")
 
 
 @router.post("/{campaign_id}/retry-failed")

@@ -23,31 +23,56 @@ function Field({ label, hint, children }) {
 const inputCls = "w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 transition-colors";
 
 const PROVIDERS = [
-  { value: "openai",      label: "OpenAI (GPT)" },
-  { value: "openrouter",  label: "OpenRouter (350+ моделей)" },
-  { value: "anthropic",   label: "Anthropic (Claude)" },
-  { value: "ollama",      label: "Ollama (локальная)" },
-  { value: "lmstudio",    label: "LM Studio (локальная)" },
+  { value: "openai", label: "OpenAI (GPT)" },
+  { value: "openrouter", label: "OpenRouter" },
+  { value: "anthropic", label: "Anthropic (Claude)" },
+  { value: "ollama", label: "Ollama" },
+  { value: "lmstudio", label: "LM Studio" },
 ];
 
 const OPENAI_MODELS = [
-  { value: "gpt-4o-mini",  label: "gpt-4o-mini — быстрая и дешёвая" },
-  { value: "gpt-4o",       label: "gpt-4o — умнее" },
-  { value: "gpt-4-turbo",  label: "gpt-4-turbo" },
-  { value: "o1-mini",      label: "o1-mini" },
+  { value: "gpt-4o-mini", label: "gpt-4o-mini" },
+  { value: "gpt-4o", label: "gpt-4o" },
+  { value: "gpt-4-turbo", label: "gpt-4-turbo" },
+  { value: "o1-mini", label: "o1-mini" },
 ];
 
 const ANTHROPIC_MODELS = [
-  { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 — быстрая" },
-  { value: "claude-sonnet-4-6",         label: "Claude Sonnet 4.6 — баланс" },
-  { value: "claude-opus-4-6",           label: "Claude Opus 4.6 — мощная" },
+  { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+  { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+  { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
 ];
+
+function SecretField({ label, placeholder, value, onChange, configured, onClear, hint }) {
+  return (
+    <Field label={label} hint={hint}>
+      <div className="space-y-2">
+        <input type="password" className={inputCls} placeholder={configured ? "Configured" : placeholder} value={value}
+          onChange={onChange} />
+        <div className="flex items-center gap-3">
+          <span className={`text-xs ${configured ? "text-emerald-400" : "text-zinc-500"}`}>
+            {configured ? "Ключ сохранён" : "Ключ не задан"}
+          </span>
+          {configured && (
+            <button type="button" onClick={onClear} className="text-xs text-red-400 hover:text-red-300 transition-colors">
+              Очистить
+            </button>
+          )}
+        </div>
+      </div>
+    </Field>
+  );
+}
 
 export default function Settings() {
   const [form, setForm] = useState({
     provider: "openai",
     openai_key: "",
     anthropic_key: "",
+    openai_key_configured: false,
+    anthropic_key_configured: false,
+    clear_openai_key: false,
+    clear_anthropic_key: false,
     base_url: "",
     model: "gpt-4o-mini",
     system_prompt: "Ты вежливый менеджер по продажам. Отвечай кратко и по делу.",
@@ -56,12 +81,16 @@ export default function Settings() {
   });
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
-  useEffect(() => { api.getSettings().then(setForm).finally(() => setLoading(false)); }, []);
+  useEffect(() => {
+    api.getSettings().then((data) => setForm((f) => ({ ...f, ...data }))).finally(() => setLoading(false));
+  }, []);
 
   const handleSave = async () => {
     await api.saveSettings(form);
+    const fresh = await api.getSettings();
+    setForm((f) => ({ ...f, ...fresh, openai_key: "", anthropic_key: "", clear_openai_key: false, clear_anthropic_key: false }));
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
   };
@@ -80,90 +109,89 @@ export default function Settings() {
 
       <Section title="AI Провайдер">
         <Field label="Провайдер">
-          <select className={inputCls} value={form.provider} onChange={e => set("provider", e.target.value)}>
-            {PROVIDERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+          <select className={inputCls} value={form.provider} onChange={(e) => set("provider", e.target.value)}>
+            {PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
           </select>
         </Field>
 
-        {/* OpenAI */}
         {form.provider === "openai" && (
           <>
-            <Field label="OpenAI API Key" hint="Получи на platform.openai.com">
-              <input type="password" className={inputCls} placeholder="sk-..." value={form.openai_key}
-                onChange={e => set("openai_key", e.target.value)} />
-            </Field>
+            <SecretField
+              label="OpenAI API Key"
+              hint="Ключ не возвращается из backend в браузер"
+              placeholder="sk-..."
+              value={form.openai_key}
+              configured={form.openai_key_configured && !form.clear_openai_key}
+              onChange={(e) => setForm((f) => ({ ...f, openai_key: e.target.value, clear_openai_key: false }))}
+              onClear={() => setForm((f) => ({ ...f, openai_key: "", clear_openai_key: true, openai_key_configured: false }))}
+            />
             <Field label="Модель">
-              <select className={inputCls} value={form.model} onChange={e => set("model", e.target.value)}>
-                {OPENAI_MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+              <select className={inputCls} value={form.model} onChange={(e) => set("model", e.target.value)}>
+                {OPENAI_MODELS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
               </select>
             </Field>
           </>
         )}
 
-        {/* OpenRouter */}
         {form.provider === "openrouter" && (
           <>
-            <Field label="OpenRouter API Key" hint="Получи на openrouter.ai → Keys">
-              <input type="password" className={inputCls} placeholder="sk-or-v1-..." value={form.openai_key}
-                onChange={e => set("openai_key", e.target.value)} />
-            </Field>
-            <Field label="Модель" hint="Формат: provider/model-name, например meta-llama/llama-3.3-70b-instruct:free">
+            <SecretField
+              label="OpenRouter API Key"
+              hint="Использует то же защищённое поле, что и OpenAI-compatible ключи"
+              placeholder="sk-or-v1-..."
+              value={form.openai_key}
+              configured={form.openai_key_configured && !form.clear_openai_key}
+              onChange={(e) => setForm((f) => ({ ...f, openai_key: e.target.value, clear_openai_key: false }))}
+              onClear={() => setForm((f) => ({ ...f, openai_key: "", clear_openai_key: true, openai_key_configured: false }))}
+            />
+            <Field label="Модель">
               <input className={inputCls} placeholder="meta-llama/llama-3.3-70b-instruct:free" value={form.model}
-                onChange={e => set("model", e.target.value)} />
+                onChange={(e) => set("model", e.target.value)} />
             </Field>
-            <div className="bg-zinc-800/50 border border-zinc-700/50 rounded-lg px-4 py-3">
-              <p className="text-xs text-zinc-400">Бесплатные модели: <span className="text-zinc-200">meta-llama/llama-3.3-70b-instruct:free</span>, <span className="text-zinc-200">mistralai/mistral-7b-instruct:free</span>, <span className="text-zinc-200">google/gemma-3-27b-it:free</span></p>
-            </div>
           </>
         )}
 
-        {/* Anthropic */}
         {form.provider === "anthropic" && (
           <>
-            <Field label="Anthropic API Key" hint="Получи на console.anthropic.com">
-              <input type="password" className={inputCls} placeholder="sk-ant-..." value={form.anthropic_key}
-                onChange={e => set("anthropic_key", e.target.value)} />
-            </Field>
+            <SecretField
+              label="Anthropic API Key"
+              placeholder="sk-ant-..."
+              value={form.anthropic_key}
+              configured={form.anthropic_key_configured && !form.clear_anthropic_key}
+              onChange={(e) => setForm((f) => ({ ...f, anthropic_key: e.target.value, clear_anthropic_key: false }))}
+              onClear={() => setForm((f) => ({ ...f, anthropic_key: "", clear_anthropic_key: true, anthropic_key_configured: false }))}
+            />
             <Field label="Модель">
-              <select className={inputCls} value={form.model} onChange={e => set("model", e.target.value)}>
-                {ANTHROPIC_MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+              <select className={inputCls} value={form.model} onChange={(e) => set("model", e.target.value)}>
+                {ANTHROPIC_MODELS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
               </select>
             </Field>
           </>
         )}
 
-        {/* Ollama / LM Studio */}
         {isLocal && (
           <>
             <Field label="Base URL" hint={`По умолчанию: ${defaultBaseUrl}`}>
               <input className={inputCls} placeholder={defaultBaseUrl} value={form.base_url}
-                onChange={e => set("base_url", e.target.value)} />
+                onChange={(e) => set("base_url", e.target.value)} />
             </Field>
-            <Field label="Модель" hint={form.provider === "ollama" ? "Например: llama3, mistral, gemma2" : "Название модели из LM Studio"}>
+            <Field label="Модель">
               <input className={inputCls} placeholder={form.provider === "ollama" ? "llama3" : "local-model"} value={form.model}
-                onChange={e => set("model", e.target.value)} />
+                onChange={(e) => set("model", e.target.value)} />
             </Field>
-            <div className="bg-zinc-800/50 border border-zinc-700/50 rounded-lg px-4 py-3">
-              <p className="text-xs text-zinc-400">
-                {form.provider === "ollama"
-                  ? "Убедись что Ollama запущена: ollama serve"
-                  : "Убедись что LM Studio запущена с включённым Local Server"}
-              </p>
-            </div>
           </>
         )}
       </Section>
 
       <Section title="Промпт">
-        <Field label="System Prompt" hint="Инструкция для AI — кто он и как отвечает">
+        <Field label="System Prompt">
           <textarea rows={6} className={`${inputCls} font-mono text-xs leading-relaxed resize-y`}
-            value={form.system_prompt} onChange={e => set("system_prompt", e.target.value)} />
+            value={form.system_prompt} onChange={(e) => set("system_prompt", e.target.value)} />
         </Field>
-        <Field label={`Сообщений в контексте: ${form.context_messages}`}
-          hint="Сколько последних сообщений передавать AI для контекста">
+        <Field label={`Сообщений в контексте: ${form.context_messages}`}>
           <div className="flex items-center gap-3">
             <input type="range" min={3} max={30} value={form.context_messages}
-              onChange={e => set("context_messages", Number(e.target.value))}
+              onChange={(e) => set("context_messages", Number(e.target.value))}
               className="flex-1 accent-blue-500" />
             <span className="text-sm font-mono text-zinc-300 w-6 text-right">{form.context_messages}</span>
           </div>

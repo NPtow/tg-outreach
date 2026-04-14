@@ -6,6 +6,8 @@ from typing import Optional
 
 from backend.database import get_db
 from backend.models import Campaign, Conversation, Message, Account
+from backend.runtime_config import owns_telegram_runtime
+from backend.worker_client import forward_to_worker
 import backend.telegram_client as tg
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -117,11 +119,16 @@ async def send_message(conv_id: int, data: SendMessageRequest, db: Session = Dep
     if not conv:
         raise HTTPException(404, "Conversation not found")
 
-    client = tg._clients.get(conv.account_id)
-    if not client:
-        raise HTTPException(400, "Account is not connected")
-
-    await client.send_message(int(conv.tg_user_id), data.text)
+    if owns_telegram_runtime():
+        result = await tg.send_manual_message(conv.account_id, conv.tg_user_id, conv.id, data.text)
+    else:
+        result = await forward_to_worker(
+            "POST",
+            f"/internal/runtime/conversations/{conv_id}/send",
+            json_body={"text": data.text},
+        )
+    if not result.get("ok"):
+        raise HTTPException(400, result)
 
     msg = Message(conversation_id=conv.id, role="assistant", text=data.text)
     db.add(msg)

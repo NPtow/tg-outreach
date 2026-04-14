@@ -218,7 +218,7 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
   const [showPicker, setShowPicker] = useState(false);
 
   const inputCls = "w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 transition-colors";
-  const activeAccounts = accounts.filter(a => a.is_active);
+  const activeAccounts = accounts.filter(a => a.eligibility_state === "eligible");
 
   const toggleAccount = (id) => {
     setForm(f => {
@@ -468,6 +468,7 @@ export default function Campaigns() {
   const [accounts, setAccounts] = useState([]);
   const [prompts, setPrompts] = useState([]);
   const [showModal, setShowModal] = useState(false);
+  const [startErrors, setStartErrors] = useState({});
   const load = () => api.getCampaigns().then(setCampaigns);
 
   useEffect(() => {
@@ -477,7 +478,29 @@ export default function Campaigns() {
   }, []);
   useWsEvent(msg => { if (msg.event === "campaign_progress") load(); });
 
-  const handleStart = async id => { await api.startCampaign(id).catch(e => alert(e.message)); load(); };
+  const handleStart = async id => {
+    try {
+      const result = await api.startCampaign(id);
+      setStartErrors((prev) => ({ ...prev, [id]: null }));
+      if (result?.blocked_accounts?.length) {
+        setStartErrors((prev) => ({
+          ...prev,
+          [id]: `Часть аккаунтов исключена: ${result.blocked_accounts.map((a) => `${a.name || "#" + a.account_id} → ${a.reason}`).join(", ")}`,
+        }));
+      }
+    } catch (e) {
+      const payload = e.payload;
+      if (payload?.blocked_accounts?.length) {
+        setStartErrors((prev) => ({
+          ...prev,
+          [id]: payload.blocked_accounts.map((a) => `${a.name || "#" + a.account_id} → ${a.reason}${a.error ? ` (${a.error})` : ""}`).join("; "),
+        }));
+      } else {
+        setStartErrors((prev) => ({ ...prev, [id]: e.message }));
+      }
+    }
+    load();
+  };
   const handlePause = async id => { await api.pauseCampaign(id); load(); };
   const handleRetry = async id => { await api.retryFailed(id).catch(e => alert(e.message)); load(); };
   const handleDelete = async id => { if (!confirm("Удалить кампанию?")) return; await api.deleteCampaign(id); load(); };
@@ -569,6 +592,11 @@ export default function Campaigns() {
                   <div className={`h-1 rounded-full transition-all duration-500 ${c.status === "done" ? "bg-blue-500" : "bg-emerald-500"}`}
                     style={{ width: `${pct}%` }} />
                 </div>
+                {startErrors[c.id] && (
+                  <p className="text-xs text-red-300 bg-red-500/10 px-3 py-2 rounded-lg mt-3">
+                    {startErrors[c.id]}
+                  </p>
+                )}
               </div>
             );
           })}

@@ -9,6 +9,7 @@ import os
 import random
 import shutil
 import tempfile
+import time
 import zipfile
 from datetime import datetime, timedelta
 from typing import Dict, Optional
@@ -32,6 +33,7 @@ from backend.models import (
     Account, Campaign, CampaignTarget, Conversation,
     DoNotContact, Message, Settings,
 )
+from backend.security import decrypt_value, encrypt_value
 
 logger = logging.getLogger(__name__)
 
@@ -61,20 +63,189 @@ def _session_path(account_id: int) -> str:
 def _build_proxy(account: Account):
     if not account.proxy_host or not account.proxy_port:
         return None
-    import socks
-    type_map = {"HTTP": socks.HTTP, "SOCKS5": socks.SOCKS5, "SOCKS4": socks.SOCKS4}
-    ptype = type_map.get((account.proxy_type or "HTTP").upper(), socks.HTTP)
-    return (ptype, account.proxy_host, int(account.proxy_port), True,
-            account.proxy_user or None, account.proxy_pass or None)
+    type_map = {"HTTP": "http", "SOCKS5": "socks5", "SOCKS4": "socks4"}
+    return {
+        "proxy_type": type_map.get((account.proxy_type or "SOCKS5").upper(), "socks5"),
+        "addr": account.proxy_host,
+        "port": int(account.proxy_port),
+        "username": account.proxy_user or None,
+        "password": decrypt_value(account.proxy_pass) or None,
+        "rdns": True,
+    }
 
 
 def _make_client(account: Account) -> TelegramClient:
     proxy = _build_proxy(account)
-    if account.session_string:
-        session = StringSession(account.session_string)
+    session_string = decrypt_value(account.session_string)
+    app_hash = decrypt_value(account.app_hash) or account.app_hash
+    if session_string:
+        session = StringSession(session_string)
     else:
         session = _session_path(account.id)
-    return TelegramClient(session, int(account.app_id), account.app_hash, proxy=proxy)
+    return TelegramClient(session, int(account.app_id), app_hash, proxy=proxy)
+
+
+def _utcnow() -> datetime:
+    return datetime.utcnow()
+
+
+def _derive_session_state(account: Account) -> str:
+    if decrypt_value(account.session_string):
+        return "valid"
+    if decrypt_value(account.tdata_blob):
+        return "expired"
+    return "missing"
+
+
+def _compute_eligibility(account: Account) -> str:
+    now = _utcnow()
+    if account.quarantine_until and account.quarantine_until > now:
+        return "blocked_quarantine"
+    if (account.proxy_state or "unknown") in {"failed", "timeout", "auth_failed"}:
+        return "blocked_proxy"
+    if getattr(account, "needs_reauth", False) or (account.session_state or "missing") in {
+        "missing",
+        "expired",
+        "recovery_failed",
+    }:
+        return "blocked_auth"
+    if (account.connection_state or "offline") == "online":
+        return "eligible"
+    return "blocked_auth"
+
+
+def _serialize_health(account: Account) -> dict:
+    return {
+        "account_id": account.id,
+        "connection_state": account.connection_state or "offline",
+        "proxy_state": account.proxy_state or "unknown",
+        "session_state": account.session_state or "missing",
+        "eligibility_state": _compute_eligibility(account),
+        "last_error_code": account.last_error_code,
+        "last_error_message": account.last_error_message,
+        "last_error_at": account.last_error_at,
+        "last_proxy_check_at": account.last_proxy_check_at,
+        "last_connect_at": account.last_connect_at,
+        "last_seen_online_at": account.last_seen_online_at,
+        "quarantine_until": account.quarantine_until,
+        "warmup_level": account.warmup_level or 0,
+        "session_source": account.session_source or "",
+        "proxy_last_rtt_ms": account.proxy_last_rtt_ms,
+    }
+
+
+def _persist_account_health(account_id: int, **updates) -> dict:
+    db = SessionLocal()
+    try:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        if not acc:
+            return {}
+        for key, value in updates.items():
+            setattr(acc, key, value)
+        if "session_state" not in updates:
+            acc.session_state = _derive_session_state(acc)
+        acc.eligibility_state = _compute_eligibility(acc)
+        db.commit()
+        db.refresh(acc)
+        return _serialize_health(acc)
+    finally:
+        db.close()
+
+
+def _mark_error(account_id: int, code: str, message: str, **extra) -> dict:
+    return _persist_account_health(
+        account_id,
+        last_error_code=code,
+        last_error_message=message,
+        last_error_at=_utcnow(),
+        **extra,
+    )
+
+
+def _clear_error(account_id: int, **extra) -> dict:
+    return _persist_account_health(
+        account_id,
+        last_error_code=None,
+        last_error_message=None,
+        last_error_at=None,
+        **extra,
+    )
+
+
+def _warmup_daily_cap(account: Account) -> int:
+    warmup_caps = [10, 20, 35, 50]
+    level = max(0, min(account.warmup_level or 0, len(warmup_caps) - 1))
+    return warmup_caps[level]
+
+
+def _quarantine_account(account_id: int, until: datetime, code: str, message: str) -> dict:
+    health = _persist_account_health(
+        account_id,
+        connection_state="quarantined",
+        eligibility_state="blocked_quarantine",
+        quarantine_until=until,
+        last_error_code=code,
+        last_error_message=message,
+        last_error_at=_utcnow(),
+    )
+    if _ws_broadcast:
+        asyncio.create_task(_ws_broadcast({"event": "account_health", "account_id": account_id, "health": health}))
+    return health
+
+
+async def _proxy_connectivity_check(account: Account) -> dict:
+    started = time.perf_counter()
+    target_host = "149.154.167.50"
+    target_port = 443
+    try:
+        if account.proxy_host and account.proxy_port:
+            from python_socks import ProxyType
+            from python_socks.async_.asyncio import Proxy
+
+            type_map = {
+                "SOCKS5": ProxyType.SOCKS5,
+                "SOCKS4": ProxyType.SOCKS4,
+                "HTTP": ProxyType.HTTP,
+            }
+            proxy = Proxy.create(
+                proxy_type=type_map.get((account.proxy_type or "SOCKS5").upper(), ProxyType.SOCKS5),
+                host=account.proxy_host,
+                port=int(account.proxy_port),
+                username=account.proxy_user or None,
+                password=decrypt_value(account.proxy_pass) or None,
+            )
+            sock = await asyncio.wait_for(proxy.connect(dest_host=target_host, dest_port=target_port), timeout=10)
+            sock.close()
+        else:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(target_host, target_port), timeout=10)
+            writer.close()
+            await writer.wait_closed()
+        rtt_ms = int((time.perf_counter() - started) * 1000)
+        health = _clear_error(
+            account.id,
+            proxy_state="ok",
+            last_proxy_check_at=_utcnow(),
+            proxy_last_rtt_ms=rtt_ms,
+        )
+        return {"ok": True, "proxy_state": "ok", "rtt_ms": rtt_ms, "health": health}
+    except asyncio.TimeoutError:
+        health = _mark_error(
+            account.id,
+            "PROXY_TIMEOUT",
+            "Proxy connection timed out",
+            proxy_state="timeout",
+            last_proxy_check_at=_utcnow(),
+        )
+        return {"ok": False, "proxy_state": "timeout", "error": "Proxy connection timed out", "health": health}
+    except Exception as exc:
+        health = _mark_error(
+            account.id,
+            "PROXY_FAILED",
+            str(exc),
+            proxy_state="failed",
+            last_proxy_check_at=_utcnow(),
+        )
+        return {"ok": False, "proxy_state": "failed", "error": str(exc), "health": health}
 
 
 async def _save_session_string(account_id: int, client: TelegramClient):
@@ -82,7 +253,9 @@ async def _save_session_string(account_id: int, client: TelegramClient):
     try:
         acc = db.query(Account).filter(Account.id == account_id).first()
         if acc:
-            acc.session_string = client.session.save()
+            acc.session_string = encrypt_value(client.session.save())
+            acc.session_state = "valid"
+            acc.session_source = acc.session_source or "session_string"
             db.commit()
     finally:
         db.close()
@@ -96,6 +269,20 @@ async def save_session_now(account_id: int) -> bool:
     await _save_session_string(account_id, client)
     logger.info(f"Session saved for account {account_id}")
     return True
+
+
+async def proxy_test_account(account_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        if not acc:
+            return {"ok": False, "error": "Account not found"}
+    finally:
+        db.close()
+    result = await _proxy_connectivity_check(acc)
+    if _ws_broadcast:
+        await _ws_broadcast({"event": "account_health", "account_id": account_id, "health": result.get("health", {})})
+    return result
 
 
 def _resolve_prompt(settings: Settings, account: Account, campaign: Optional[Campaign]) -> str:
@@ -163,9 +350,11 @@ async def _handle_message(account_id: int, event):
         if not settings or not settings.auto_reply_enabled:
             return
         provider = getattr(settings, "provider", "openai") or "openai"
-        if provider in ("openai", "openrouter") and not settings.openai_key:
+        openai_key = decrypt_value(settings.openai_key)
+        anthropic_key = decrypt_value(getattr(settings, "anthropic_key", ""))
+        if provider in ("openai", "openrouter") and not openai_key:
             return
-        if provider == "anthropic" and not getattr(settings, "anthropic_key", ""):
+        if provider == "anthropic" and not anthropic_key:
             return
 
         tg_user_id = str(sender.id)
@@ -330,8 +519,8 @@ async def _handle_message(account_id: int, event):
         from backend.gpt_handler import generate_reply
         reply = await generate_reply(
             provider=getattr(settings, "provider", "openai") or "openai",
-            openai_key=settings.openai_key or "",
-            anthropic_key=getattr(settings, "anthropic_key", "") or "",
+            openai_key=openai_key or "",
+            anthropic_key=anthropic_key or "",
             base_url=getattr(settings, "base_url", "") or "",
             model=settings.model,
             system_prompt=system_prompt,
@@ -364,6 +553,40 @@ async def _handle_message(account_id: int, event):
         db.close()
 
 
+async def convert_tdata_to_session(
+    tdata_path: str,
+    proxy_host: Optional[str] = None,
+    proxy_port: Optional[int] = None,
+    proxy_type: str = "SOCKS5",
+    proxy_user: Optional[str] = None,
+    proxy_pass: Optional[str] = None,
+) -> Optional[str]:
+    proxy = None
+    if proxy_host and proxy_port:
+        type_map = {"HTTP": "http", "SOCKS5": "socks5", "SOCKS4": "socks4"}
+        proxy = {
+            "proxy_type": type_map.get((proxy_type or "SOCKS5").upper(), "socks5"),
+            "addr": proxy_host,
+            "port": int(proxy_port),
+            "username": proxy_user or None,
+            "password": proxy_pass or None,
+            "rdns": True,
+        }
+
+    from opentele.td import TDesktop
+    from opentele.api import CreateNewSession
+
+    tdesk = TDesktop(tdata_path)
+    client = await tdesk.ToTelethon(session=StringSession(), flag=CreateNewSession, proxy=proxy)
+    await client.connect()
+    try:
+        if await client.is_user_authorized():
+            return client.session.save()
+        return None
+    finally:
+        await client.disconnect()
+
+
 async def _try_recover_from_tdata(account_id: int) -> Optional[str]:
     """Re-derive a fresh session_string from stored tdata using CreateNewSession.
     tdata's original auth key (KEY_A) stays intact; service gets a new independent key (KEY_C).
@@ -375,7 +598,7 @@ async def _try_recover_from_tdata(account_id: int) -> Optional[str]:
             logger.info(f"Account {account_id}: no tdata_blob stored, cannot auto-recover")
             return None
 
-        zip_bytes = base64.b64decode(acc.tdata_blob)
+        zip_bytes = base64.b64decode(decrypt_value(acc.tdata_blob))
         tmp_dir = tempfile.mkdtemp()
         try:
             zip_path = os.path.join(tmp_dir, "tdata.zip")
@@ -393,21 +616,18 @@ async def _try_recover_from_tdata(account_id: int) -> Optional[str]:
                 logger.error(f"Account {account_id}: tdata recovery — key_datas not found in zip")
                 return None
 
-            proxy = _build_proxy(acc)
-            from opentele.td import TDesktop
-            from opentele.api import CreateNewSession
-
-            tdesk = TDesktop(tdata_path)
-            client = await tdesk.ToTelethon(
-                session=StringSession(), flag=CreateNewSession, proxy=proxy
+            session_str = await convert_tdata_to_session(
+                tdata_path=tdata_path,
+                proxy_host=acc.proxy_host,
+                proxy_port=acc.proxy_port,
+                proxy_type=acc.proxy_type or "SOCKS5",
+                proxy_user=acc.proxy_user,
+                proxy_pass=decrypt_value(acc.proxy_pass) or None,
             )
-            await client.connect()
-            authorized = await client.is_user_authorized()
-            session_str = client.session.save() if authorized else None
-            await client.disconnect()
 
             if session_str:
-                acc.session_string = session_str
+                acc.session_string = encrypt_value(session_str)
+                acc.session_state = "valid"
                 db.commit()
                 logger.info(f"Account {account_id}: session successfully recovered from tdata")
                 return session_str
@@ -428,29 +648,125 @@ async def _set_needs_reauth(account_id: int, value: bool):
         acc = db.query(Account).filter(Account.id == account_id).first()
         if acc:
             acc.needs_reauth = value
+            if value:
+                acc.connection_state = "reauth_required"
+                acc.session_state = "expired"
             db.commit()
     finally:
         db.close()
 
 
+def get_account_health(account_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        return _serialize_health(acc) if acc else {}
+    finally:
+        db.close()
+
+
+async def reconnect_account_runtime(account_id: int, requested_by: str = "system") -> dict:
+    db = SessionLocal()
+    try:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        if not acc:
+            return {"ok": False, "error": "Account not found", "requested_by": requested_by}
+        quarantine_until = getattr(acc, "quarantine_until", None)
+        if quarantine_until and quarantine_until > _utcnow():
+            health = _persist_account_health(account_id, connection_state="quarantined")
+            result = {
+                "ok": False,
+                "requested_by": requested_by,
+                "error": "Account is quarantined",
+                "reason": "blocked_quarantine",
+                "health": health,
+            }
+            if _ws_broadcast:
+                await _ws_broadcast({"event": "account_health", "account_id": account_id, "health": health})
+            return result
+        _persist_account_health(
+            account_id,
+            connection_state="connecting",
+            session_state=_derive_session_state(acc),
+        )
+    finally:
+        db.close()
+
+    proxy_result = await proxy_test_account(account_id)
+    if not proxy_result.get("ok"):
+        return {
+            "ok": False,
+            "requested_by": requested_by,
+            "reason": "blocked_proxy",
+            "steps": {"proxy": proxy_result},
+            "health": get_account_health(account_id),
+        }
+
+    db = SessionLocal()
+    try:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        ok = await start_client(acc)
+        health = get_account_health(account_id)
+        result = {
+            "ok": ok,
+            "requested_by": requested_by,
+            "steps": {
+                "proxy": proxy_result,
+                "session": {"state": health.get("session_state")},
+                "telegram": {"ok": ok, "state": health.get("connection_state")},
+            },
+            "health": health,
+        }
+        if not ok:
+            result["reason"] = health.get("eligibility_state")
+            result["error"] = health.get("last_error_message") or "Failed to connect"
+        if _ws_broadcast:
+            await _ws_broadcast({"event": "account_health", "account_id": account_id, "health": health})
+        return result
+    finally:
+        db.close()
+
+
 async def start_client(account: Account, _tdata_retried: bool = False) -> bool:
+    if not account:
+        return False
     if account.id in _clients:
+        _clear_error(
+            account.id,
+            connection_state="online",
+            session_state="valid",
+            proxy_state="ok",
+            last_seen_online_at=_utcnow(),
+        )
         return True
 
+    _persist_account_health(account.id, connection_state="connecting", session_state=_derive_session_state(account))
     client = _make_client(account)
     try:
         await client.connect()
         if not await client.is_user_authorized():
             logger.warning(f"Account {account.id} session expired — needs re-auth")
             await client.disconnect()
+            _mark_error(account.id, "SESSION_EXPIRED", "Session expired", session_state="expired")
             if not _tdata_retried and getattr(account, "tdata_blob", None):
+                _persist_account_health(account.id, session_state="recovering")
                 recovered = await _try_recover_from_tdata(account.id)
                 if recovered:
-                    account.session_string = recovered
+                    account.session_string = encrypt_value(recovered)
                     return await start_client(account, _tdata_retried=True)
+                _persist_account_health(account.id, session_state="recovery_failed")
             await _set_needs_reauth(account.id, True)
             return False
 
+        _persist_account_health(
+            account.id,
+            connection_state="online",
+            proxy_state="ok",
+            session_state="valid",
+            eligibility_state="eligible",
+            last_connect_at=_utcnow(),
+            last_seen_online_at=_utcnow(),
+        )
         await _set_needs_reauth(account.id, False)
         await _save_session_string(account.id, client)
 
@@ -469,16 +785,20 @@ async def start_client(account: Account, _tdata_retried: bool = False) -> bool:
     except (AuthKeyDuplicatedError, AuthKeyUnregisteredError, UserDeactivatedBanError) as e:
         logger.error(f"Auth key invalid for account {account.id}: {e}")
         await client.disconnect()
+        _mark_error(account.id, type(e).__name__, str(e), session_state="expired")
         if not _tdata_retried and getattr(account, "tdata_blob", None):
+            _persist_account_health(account.id, session_state="recovering")
             recovered = await _try_recover_from_tdata(account.id)
             if recovered:
-                account.session_string = recovered
+                account.session_string = encrypt_value(recovered)
                 return await start_client(account, _tdata_retried=True)
+            _persist_account_health(account.id, session_state="recovery_failed")
         await _set_needs_reauth(account.id, True)
         return False
     except Exception as e:
         logger.error(f"Failed to start client {account.id}: {e}")
         await client.disconnect()
+        _mark_error(account.id, "CONNECT_FAILED", str(e), connection_state="degraded")
         return False
 
 
@@ -495,6 +815,12 @@ async def _run_client(client: TelegramClient, account_id: int):
             acc = db.query(Account).filter(Account.id == account_id).first()
             if acc:
                 acc.is_active = False
+                if acc.quarantine_until and acc.quarantine_until > _utcnow():
+                    acc.connection_state = "quarantined"
+                elif acc.needs_reauth:
+                    acc.connection_state = "reauth_required"
+                else:
+                    acc.connection_state = "offline"
                 db.commit()
         finally:
             db.close()
@@ -524,9 +850,20 @@ async def _supervise_accounts():
         try:
             accounts = db.query(Account).all()
             for acc in accounts:
+                if acc.quarantine_until and acc.quarantine_until <= _utcnow():
+                    acc.quarantine_until = None
+                    acc.connection_state = "offline"
+                    acc.proxy_state = "unknown" if acc.proxy_host else "ok"
+                    acc.eligibility_state = _compute_eligibility(acc)
+                    db.commit()
+
+                if not acc.last_proxy_check_at or (_utcnow() - acc.last_proxy_check_at).total_seconds() > 300:
+                    await _proxy_connectivity_check(acc)
+
                 needs_reauth = getattr(acc, "needs_reauth", False)
-                has_session = acc.session_string or os.path.exists(_session_path(acc.id) + ".session")
-                if has_session and not needs_reauth and acc.id not in _clients:
+                has_session = decrypt_value(acc.session_string) or os.path.exists(_session_path(acc.id) + ".session")
+                quarantined = acc.quarantine_until and acc.quarantine_until > _utcnow()
+                if has_session and not needs_reauth and not quarantined and acc.id not in _clients:
                     logger.info(f"Supervisor: reconnecting account {acc.id} ({acc.phone})")
                     ok = await start_client(acc)
                     if ok:
@@ -562,7 +899,9 @@ async def login_new_account(account: Account, phone_code: str, code: str, passwo
         try:
             acc = db.query(Account).filter(Account.id == account.id).first()
             if acc:
-                acc.session_string = session_str
+                acc.session_string = encrypt_value(session_str)
+                acc.session_state = "valid"
+                acc.session_source = acc.session_source or "phone_code"
                 db.commit()
         finally:
             db.close()
@@ -577,7 +916,9 @@ async def login_new_account(account: Account, phone_code: str, code: str, passwo
                 try:
                     acc = db.query(Account).filter(Account.id == account.id).first()
                     if acc:
-                        acc.session_string = session_str
+                        acc.session_string = encrypt_value(session_str)
+                        acc.session_state = "valid"
+                        acc.session_source = acc.session_source or "phone_code"
                         db.commit()
                 finally:
                     db.close()
@@ -635,6 +976,29 @@ async def resume_running_campaigns(db=None):
             db.close()
 
 
+async def send_manual_message(account_id: int, tg_user_id: str, conversation_id: int, text: str) -> dict:
+    client = _clients.get(account_id)
+    if not client:
+        reconnect = await reconnect_account_runtime(account_id, requested_by="manual-send")
+        if not reconnect.get("ok"):
+            return reconnect
+        client = _clients.get(account_id)
+    if not client:
+        return {"ok": False, "error": "Account is not connected"}
+    await client.send_message(int(tg_user_id), text)
+    _clear_error(account_id, connection_state="online", last_seen_online_at=_utcnow())
+    if _ws_broadcast:
+        await _ws_broadcast(
+            {
+                "event": "manual_message_sent",
+                "conversation_id": conversation_id,
+                "account_id": account_id,
+                "text": text,
+            }
+        )
+    return {"ok": True}
+
+
 # ── Campaign worker ──────────────────────────────────────────────
 
 async def start_campaign(campaign_id: int):
@@ -660,6 +1024,57 @@ async def stop_campaign(campaign_id: int):
 
 def campaign_is_running(campaign_id: int) -> bool:
     return campaign_id in _campaign_tasks
+
+
+async def preflight_and_start_campaign(campaign_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+        if not campaign:
+            return {"ok": False, "error": "Campaign not found"}
+        acc_ids = json.loads(campaign.account_ids) if campaign.account_ids else [campaign.account_id]
+        eligible_accounts = []
+        blocked_accounts = []
+        for aid in acc_ids:
+            acc = db.query(Account).filter(Account.id == aid).first()
+            if not acc:
+                blocked_accounts.append({"account_id": aid, "reason": "not_found", "error": "Account not found"})
+                continue
+            if aid not in _clients:
+                await reconnect_account_runtime(aid, requested_by=f"campaign:{campaign_id}")
+            snapshot = get_account_health(aid)
+            if snapshot.get("eligibility_state") == "eligible" and aid in _clients:
+                eligible_accounts.append(
+                    {"account_id": aid, "name": acc.name, "health": snapshot}
+                )
+            else:
+                blocked_accounts.append(
+                    {
+                        "account_id": aid,
+                        "name": acc.name,
+                        "reason": snapshot.get("eligibility_state") or "blocked_auth",
+                        "error": snapshot.get("last_error_message"),
+                        "health": snapshot,
+                    }
+                )
+        if not eligible_accounts:
+            return {
+                "ok": False,
+                "reason": "NO_ELIGIBLE_ACCOUNTS",
+                "eligible_accounts": [],
+                "blocked_accounts": blocked_accounts,
+            }
+        campaign.status = "running"
+        db.commit()
+    finally:
+        db.close()
+
+    await start_campaign(campaign_id)
+    return {
+        "ok": True,
+        "eligible_accounts": eligible_accounts,
+        "blocked_accounts": blocked_accounts,
+    }
 
 
 def _seconds_until_window_open(hour_from: int, hour_to: int) -> int:
@@ -783,13 +1198,30 @@ async def _campaign_worker(campaign_id: int):
                     continue
 
                 # ── Pick a connected client (random among available) ──
-                available = [(aid, _clients[aid]) for aid in acc_ids if aid in _clients]
+                available = []
+                for aid in acc_ids:
+                    if aid not in _clients:
+                        continue
+                    acc = db.query(Account).filter(Account.id == aid).first()
+                    if not acc:
+                        continue
+                    if _compute_eligibility(acc) != "eligible":
+                        continue
+                    sent_by_account_today = db.query(CampaignTarget).filter(
+                        CampaignTarget.account_id == aid,
+                        CampaignTarget.status == "sent",
+                        CampaignTarget.sent_at >= today_start,
+                    ).count()
+                    account_cap = min(campaign.daily_limit, _warmup_daily_cap(acc))
+                    if sent_by_account_today >= account_cap:
+                        continue
+                    available.append((aid, _clients[aid], acc))
                 if not available:
                     logger.warning(f"Campaign {campaign_id}: no accounts connected, retrying in 60s")
                     db.close()
                     await asyncio.sleep(60)
                     continue
-                _account_id, client = random.choice(available)
+                _account_id, client, _account = random.choice(available)
 
                 messages = json.loads(campaign.messages)
                 text = random.choice(messages)
@@ -798,20 +1230,34 @@ async def _campaign_worker(campaign_id: int):
                 try:
                     await client.send_message(target.username, text)
                     target.status = "sent"
+                    target.account_id = _account_id
                     target.sent_at = datetime.utcnow()
+                    _clear_error(_account_id, connection_state="online", last_seen_online_at=_utcnow())
                     logger.info(f"Campaign {campaign_id}: sent to {target.username}")
                 except FloodWaitError as e:
-                    wait = e.seconds + 5
-                    logger.warning(f"Campaign {campaign_id}: FloodWait {e.seconds}s, sleeping {wait}s")
+                    wait_until = _utcnow() + timedelta(seconds=e.seconds + 60)
+                    _quarantine_account(
+                        _account_id,
+                        until=wait_until,
+                        code="FLOOD_WAIT",
+                        message=f"FloodWait {e.seconds}s",
+                    )
+                    await stop_client(_account_id)
+                    logger.warning(f"Campaign {campaign_id}: FloodWait {e.seconds}s on account {_account_id}")
                     db.commit()
-                    db.close()
-                    await asyncio.sleep(wait)
                     continue
                 except PeerFloodError:
-                    logger.error(f"Campaign {campaign_id}: PeerFloodError — pausing to protect account")
-                    campaign.status = "paused"
+                    wait_until = _utcnow() + timedelta(hours=24)
+                    _quarantine_account(
+                        _account_id,
+                        until=wait_until,
+                        code="PEER_FLOOD",
+                        message="PeerFloodError — account quarantined",
+                    )
+                    await stop_client(_account_id)
+                    logger.error(f"Campaign {campaign_id}: PeerFloodError on account {_account_id}")
                     db.commit()
-                    break
+                    continue
                 except (UserPrivacyRestrictedError, UsernameNotOccupiedError, UsernameInvalidError) as e:
                     target.status = "failed"
                     target.error = str(e)

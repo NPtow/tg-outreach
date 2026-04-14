@@ -25,7 +25,7 @@ def get_db():
 
 
 def init_db():
-    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact, Contact, ContactBatch  # noqa
+    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact, Contact, ContactBatch, RuntimeEvent  # noqa
     Base.metadata.create_all(bind=engine)
 
     # Add new columns to existing tables (safe to re-run — errors for existing columns are swallowed)
@@ -41,6 +41,20 @@ def init_db():
         ("accounts", "proxy_user TEXT"),
         ("accounts", "proxy_pass TEXT"),
         ("accounts", "prompt_template_id INTEGER"),
+        ("accounts", "connection_state TEXT DEFAULT 'offline'"),
+        ("accounts", "proxy_state TEXT DEFAULT 'unknown'"),
+        ("accounts", "session_state TEXT DEFAULT 'missing'"),
+        ("accounts", "eligibility_state TEXT DEFAULT 'blocked_auth'"),
+        ("accounts", "last_error_code TEXT"),
+        ("accounts", "last_error_message TEXT"),
+        ("accounts", "last_error_at TIMESTAMP"),
+        ("accounts", "last_proxy_check_at TIMESTAMP"),
+        ("accounts", "last_connect_at TIMESTAMP"),
+        ("accounts", "last_seen_online_at TIMESTAMP"),
+        ("accounts", "quarantine_until TIMESTAMP"),
+        ("accounts", "warmup_level INTEGER DEFAULT 0"),
+        ("accounts", "session_source TEXT"),
+        ("accounts", "proxy_last_rtt_ms INTEGER"),
         # campaigns
         ("campaigns", "account_ids TEXT"),
         ("campaigns", "send_hour_from INTEGER DEFAULT 9"),
@@ -51,6 +65,7 @@ def init_db():
         ("campaigns", "hot_keywords TEXT"),
         ("campaigns", "max_messages INTEGER"),
         # campaign_targets
+        ("campaign_targets", "account_id INTEGER"),
         ("campaign_targets", "display_name TEXT"),
         ("campaign_targets", "company TEXT"),
         ("campaign_targets", "role TEXT"),
@@ -94,6 +109,20 @@ def init_db():
                     conn.execute(text(
                         f"ALTER TABLE {table} ALTER COLUMN {col} TYPE BOOLEAN USING {col}::boolean"
                     ))
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+
+        text_cols = [
+            ("accounts", "app_hash"),
+            ("accounts", "proxy_pass"),
+            ("settings", "openai_key"),
+            ("settings", "anthropic_key"),
+        ]
+        with engine.connect() as conn:
+            for table, col in text_cols:
+                try:
+                    conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {col} TYPE TEXT"))
                     conn.commit()
                 except Exception:
                     conn.rollback()

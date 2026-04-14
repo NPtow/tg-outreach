@@ -1,35 +1,59 @@
 const BASE = import.meta.env.VITE_API_URL || "";
+const APP_TOKEN = import.meta.env.VITE_APP_TOKEN || "";
+
+function buildHeaders(contentType = "application/json") {
+  const headers = {};
+  if (contentType) headers["Content-Type"] = contentType;
+  if (APP_TOKEN) headers["X-App-Token"] = APP_TOKEN;
+  return headers;
+}
+
+async function readError(r, path) {
+  const payload = await r.json().catch(() => ({ detail: r.statusText }));
+  const detail = payload?.detail ?? payload;
+  let message = r.statusText;
+  if (typeof detail === "string") message = detail;
+  else if (detail?.error) message = detail.error;
+  else if (detail?.reason) message = detail.reason;
+  else message = JSON.stringify(detail);
+  window.dispatchEvent(new CustomEvent("api-error", { detail: { message, url: path, status: r.status, payload: detail } }));
+  const error = new Error(message);
+  error.payload = detail;
+  error.status = r.status;
+  throw error;
+}
 
 async function req(method, path, body) {
-  const opts = { method, headers: { "Content-Type": "application/json" } };
+  const opts = { method, headers: buildHeaders() };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const r = await fetch(BASE + path, opts);
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({ detail: r.statusText }));
-    const msg = err.detail || r.statusText;
-    window.dispatchEvent(new CustomEvent("api-error", { detail: { message: msg, url: path, status: r.status } }));
-    throw new Error(msg);
-  }
+  if (!r.ok) return readError(r, path);
   return r.json();
 }
 
 export const api = {
+  getRuntimeStatus: () => req("GET", "/api/runtime/status"),
+
   // Accounts
   getAccounts: () => req("GET", "/api/accounts/"),
+  getAccountHealth: (id) => req("GET", `/api/accounts/${id}/health`),
   createAccount: (data) => req("POST", "/api/accounts/", data),
+  updateAccount: (id, data) => req("PATCH", `/api/accounts/${id}`, data),
   sendCode: (account_id) => req("POST", "/api/accounts/send-code", { account_id }),
   verifyCode: (data) => req("POST", "/api/accounts/verify-code", data),
   saveSession: (id) => req("POST", `/api/accounts/${id}/save-session`),
   reconnectAccount: (id) => req("POST", `/api/accounts/${id}/reconnect`),
+  proxyTestAccount: (id) => req("POST", `/api/accounts/${id}/proxy-test`),
   toggleReply: (id) => req("POST", `/api/accounts/${id}/toggle-reply`),
   setPrompt: (id, prompt_template_id) => req("POST", `/api/accounts/${id}/set-prompt`, { prompt_template_id }),
   deleteAccount: (id) => req("DELETE", `/api/accounts/${id}`),
   importTdata: (formData) =>
-    fetch(BASE + "/api/accounts/import-tdata", { method: "POST", body: formData }).then(async (r) => {
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({ detail: r.statusText }));
-        throw new Error(err.detail || r.statusText);
-      }
+    fetch(BASE + "/api/accounts/import-tdata", {
+      method: "POST",
+      body: formData,
+      headers: APP_TOKEN ? { "X-App-Token": APP_TOKEN } : {},
+    }).then(async (r) => {
+      if (!r.ok) return readError(r, "/api/accounts/import-tdata");
       return r.json();
     }),
 

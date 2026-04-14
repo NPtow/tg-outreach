@@ -4,14 +4,18 @@ import os
 import shutil
 import tempfile
 import zipfile
-
+from pathlib import Path
 from typing import Optional
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
 from backend.models import Account
+from backend.runtime_config import owns_telegram_runtime
+from backend.security import decrypt_value, encrypt_value, has_secret
+from backend.worker_client import forward_to_worker
 import backend.telegram_client as tg
 
 logger = logging.getLogger(__name__)
@@ -24,6 +28,23 @@ class AccountCreate(BaseModel):
     phone: str
     app_id: str
     app_hash: str
+    proxy_host: str = ""
+    proxy_port: Optional[int] = None
+    proxy_type: str = "SOCKS5"
+    proxy_user: str = ""
+    proxy_pass: str = ""
+
+
+class AccountUpdate(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    app_id: Optional[str] = None
+    app_hash: Optional[str] = None
+    proxy_host: Optional[str] = None
+    proxy_port: Optional[int] = None
+    proxy_type: Optional[str] = None
+    proxy_user: Optional[str] = None
+    proxy_pass: Optional[str] = None
 
 
 class SendCodeRequest(BaseModel):
@@ -37,24 +58,68 @@ class VerifyCodeRequest(BaseModel):
     password: str = ""
 
 
+class SetPromptRequest(BaseModel):
+    prompt_template_id: Optional[int]
+
+
+def _serialize_account(account: Account) -> dict:
+    return {
+        "id": account.id,
+        "name": account.name,
+        "phone": account.phone,
+        "app_id": account.app_id,
+        "is_active": account.connection_state == "online",
+        "auto_reply": account.auto_reply,
+        "needs_reauth": bool(getattr(account, "needs_reauth", False)),
+        "tdata_stored": has_secret(account.tdata_blob),
+        "prompt_template_id": account.prompt_template_id,
+        "created_at": account.created_at,
+        "proxy_host": account.proxy_host or "",
+        "proxy_port": account.proxy_port,
+        "proxy_type": account.proxy_type or "SOCKS5",
+        "proxy_user": account.proxy_user or "",
+        "connection_state": account.connection_state or "offline",
+        "proxy_state": account.proxy_state or "unknown",
+        "session_state": account.session_state or "missing",
+        "eligibility_state": account.eligibility_state or "blocked_auth",
+        "last_error_code": account.last_error_code,
+        "last_error_message": account.last_error_message,
+        "last_error_at": account.last_error_at,
+        "last_proxy_check_at": account.last_proxy_check_at,
+        "last_connect_at": account.last_connect_at,
+        "last_seen_online_at": account.last_seen_online_at,
+        "quarantine_until": account.quarantine_until,
+        "warmup_level": account.warmup_level or 0,
+        "session_source": account.session_source or "",
+        "proxy_last_rtt_ms": account.proxy_last_rtt_ms,
+    }
+
+
+def _safe_extract_zip(archive: zipfile.ZipFile, target_dir: str) -> None:
+    target_path = Path(target_dir).resolve()
+    for member in archive.infolist():
+        member_path = (target_path / member.filename).resolve()
+        if target_path not in member_path.parents and member_path != target_path:
+            raise HTTPException(400, "Archive contains an invalid path")
+    archive.extractall(target_dir)
+
+
+async def _forward_or_fail(method: str, path: str, json_body: Optional[dict] = None) -> dict:
+    return await forward_to_worker(method, path, json_body=json_body)
+
+
 @router.get("/")
 def list_accounts(db: Session = Depends(get_db)):
     accounts = db.query(Account).all()
-    return [
-        {
-            "id": a.id,
-            "name": a.name,
-            "phone": a.phone,
-            "app_id": a.app_id,
-            "is_active": tg.is_running(a.id),
-            "auto_reply": a.auto_reply,
-            "needs_reauth": bool(getattr(a, "needs_reauth", False)),
-            "tdata_stored": bool(getattr(a, "tdata_blob", None)),
-            "prompt_template_id": a.prompt_template_id,
-            "created_at": a.created_at,
-        }
-        for a in accounts
-    ]
+    return [_serialize_account(a) for a in accounts]
+
+
+@router.get("/{account_id}/health")
+def get_account_health(account_id: int, db: Session = Depends(get_db)):
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    return _serialize_account(acc)
 
 
 @router.post("/")
@@ -66,12 +131,48 @@ def create_account(data: AccountCreate, db: Session = Depends(get_db)):
         name=data.name,
         phone=data.phone,
         app_id=data.app_id,
-        app_hash=data.app_hash,
+        app_hash=encrypt_value(data.app_hash),
+        proxy_host=data.proxy_host or None,
+        proxy_port=data.proxy_port or None,
+        proxy_type=(data.proxy_type or "SOCKS5").upper(),
+        proxy_user=data.proxy_user or None,
+        proxy_pass=encrypt_value(data.proxy_pass) if data.proxy_pass else None,
+        session_source="phone_code",
     )
     db.add(acc)
     db.commit()
     db.refresh(acc)
     return {"id": acc.id, "name": acc.name, "phone": acc.phone}
+
+
+@router.patch("/{account_id}")
+def update_account(account_id: int, data: AccountUpdate, db: Session = Depends(get_db)):
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+
+    for field in ("name", "phone", "app_id"):
+        value = getattr(data, field)
+        if value is not None:
+            setattr(acc, field, value)
+
+    if data.app_hash is not None:
+        acc.app_hash = encrypt_value(data.app_hash) if data.app_hash else acc.app_hash
+
+    if data.proxy_host is not None:
+        acc.proxy_host = data.proxy_host or None
+    if data.proxy_port is not None:
+        acc.proxy_port = data.proxy_port or None
+    if data.proxy_type is not None:
+        acc.proxy_type = (data.proxy_type or "SOCKS5").upper()
+    if data.proxy_user is not None:
+        acc.proxy_user = data.proxy_user or None
+    if data.proxy_pass is not None:
+        acc.proxy_pass = encrypt_value(data.proxy_pass) if data.proxy_pass else None
+
+    db.commit()
+    db.refresh(acc)
+    return _serialize_account(acc)
 
 
 @router.post("/send-code")
@@ -90,19 +191,35 @@ async def verify_code(data: VerifyCodeRequest, db: Session = Depends(get_db)):
         raise HTTPException(404, "Account not found")
     result = await tg.login_new_account(acc, data.phone_code_hash, data.code, data.password)
     if result["ok"]:
-        ok = await tg.start_client(acc)
-        if ok:
-            acc.is_active = True
-            db.commit()
+        if owns_telegram_runtime():
+            reconnect_result = await tg.reconnect_account_runtime(acc.id, requested_by="verify-code")
+        else:
+            reconnect_result = await _forward_or_fail("POST", f"/internal/runtime/accounts/{acc.id}/reconnect")
+        result["runtime"] = reconnect_result
     return result
+
+
+@router.post("/{account_id}/proxy-test")
+async def proxy_test(account_id: int, db: Session = Depends(get_db)):
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    if owns_telegram_runtime():
+        return await tg.proxy_test_account(account_id)
+    return await _forward_or_fail("POST", f"/internal/runtime/accounts/{account_id}/proxy-test")
 
 
 @router.post("/{account_id}/save-session")
 async def save_session(account_id: int, db: Session = Depends(get_db)):
-    ok = await tg.save_session_now(account_id)
-    if not ok:
-        raise HTTPException(400, "Account is not connected")
-    return {"ok": True}
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    if owns_telegram_runtime():
+        ok = await tg.save_session_now(account_id)
+        if not ok:
+            raise HTTPException(400, "Account is not connected")
+        return {"ok": True}
+    return await _forward_or_fail("POST", f"/internal/runtime/accounts/{account_id}/save-session")
 
 
 @router.post("/{account_id}/reconnect")
@@ -110,17 +227,13 @@ async def reconnect_account(account_id: int, db: Session = Depends(get_db)):
     acc = db.query(Account).filter(Account.id == account_id).first()
     if not acc:
         raise HTTPException(404, "Account not found")
-    acc.needs_reauth = False
-    db.commit()
-    ok = await tg.start_client(acc)
-    if ok:
-        acc.is_active = True
-        db.commit()
-        return {"ok": True}
-    # Re-read from DB — _set_needs_reauth uses its own session so acc object is stale
-    db.refresh(acc)
-    needs_reauth = bool(getattr(acc, "needs_reauth", False))
-    raise HTTPException(400, "Сессия истекла — требуется повторная авторизация" if needs_reauth else "Не удалось подключиться к Telegram")
+    if owns_telegram_runtime():
+        result = await tg.reconnect_account_runtime(account_id, requested_by="api")
+    else:
+        result = await _forward_or_fail("POST", f"/internal/runtime/accounts/{account_id}/reconnect")
+    if not result.get("ok"):
+        raise HTTPException(400, result)
+    return result
 
 
 @router.post("/{account_id}/toggle-reply")
@@ -131,10 +244,6 @@ def toggle_reply(account_id: int, db: Session = Depends(get_db)):
     acc.auto_reply = not acc.auto_reply
     db.commit()
     return {"auto_reply": acc.auto_reply}
-
-
-class SetPromptRequest(BaseModel):
-    prompt_template_id: Optional[int]
 
 
 @router.post("/{account_id}/set-prompt")
@@ -153,27 +262,24 @@ async def import_tdata(
     phone: str = Form(...),
     proxy_host: str = Form(""),
     proxy_port: int = Form(0),
-    proxy_type: str = Form("HTTP"),
+    proxy_type: str = Form("SOCKS5"),
     proxy_user: str = Form(""),
     proxy_pass: str = Form(""),
     tdata_zip: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    """Import a Telegram account from a tdata zip archive."""
     existing = db.query(Account).filter(Account.phone == phone).first()
     if existing:
         raise HTTPException(400, "Account with this phone already exists")
 
     tmp_dir = tempfile.mkdtemp()
     try:
-        # Save and extract zip
         zip_path = os.path.join(tmp_dir, "tdata.zip")
         with open(zip_path, "wb") as f:
             f.write(await tdata_zip.read())
-        with zipfile.ZipFile(zip_path) as z:
-            z.extractall(tmp_dir)
+        with zipfile.ZipFile(zip_path) as archive:
+            _safe_extract_zip(archive, tmp_dir)
 
-        # Find tdata folder (contains key_datas file)
         tdata_path = None
         for root, _dirs, files in os.walk(tmp_dir):
             if "key_datas" in files:
@@ -182,74 +288,50 @@ async def import_tdata(
         if not tdata_path:
             raise HTTPException(400, "tdata folder not found in zip (key_datas missing)")
 
-        # Create account record (use Telegram Desktop API credentials)
         acc = Account(
             name=name,
             phone=phone,
             app_id="2040",
-            app_hash="b18441a1ff607e10a989891a5462e627",
+            app_hash=encrypt_value("b18441a1ff607e10a989891a5462e627"),
             proxy_host=proxy_host or None,
             proxy_port=proxy_port or None,
-            proxy_type=proxy_type or None,
+            proxy_type=(proxy_type or "SOCKS5").upper(),
             proxy_user=proxy_user or None,
-            proxy_pass=proxy_pass or None,
+            proxy_pass=encrypt_value(proxy_pass) if proxy_pass else None,
+            session_source="tdata",
         )
         db.add(acc)
         db.commit()
         db.refresh(acc)
 
-        # Build proxy tuple for opentele
-        proxy = None
-        if proxy_host and proxy_port:
-            import socks
-            type_map = {"HTTP": socks.HTTP, "SOCKS5": socks.SOCKS5}
-            ptype = type_map.get(proxy_type.upper(), socks.HTTP)
-            proxy = (ptype, proxy_host, int(proxy_port), True,
-                     proxy_user or None, proxy_pass or None)
-
-        # Convert tdata → Telethon StringSession via opentele
-        from opentele.td import TDesktop
-        from opentele.api import CreateNewSession
-        from telethon.sessions import StringSession
-
-        tdesk = TDesktop(tdata_path)
-        # CreateNewSession — creates an INDEPENDENT auth key for the service.
-        # tdata's original key (KEY_A) stays alive; service gets its own key (KEY_B).
-        # If KEY_B dies, _try_recover_from_tdata() uses KEY_A to create KEY_C automatically.
-        client = await tdesk.ToTelethon(
-            session=StringSession(),
-            flag=CreateNewSession,
-            proxy=proxy,
+        session_str = await tg.convert_tdata_to_session(
+            tdata_path=tdata_path,
+            proxy_host=proxy_host or None,
+            proxy_port=proxy_port or None,
+            proxy_type=(proxy_type or "SOCKS5").upper(),
+            proxy_user=proxy_user or None,
+            proxy_pass=proxy_pass or None,
         )
-        await client.connect()
-        authorized = await client.is_user_authorized()
-        session_str = client.session.save() if authorized else None
-        await client.disconnect()
-
-        if not authorized or not session_str:
+        if not session_str:
             db.delete(acc)
             db.commit()
             raise HTTPException(400, "Account not authorized after tdata conversion")
 
-        acc.session_string = session_str
-        # Store tdata zip as base64 — used for automatic session recovery without phone code
+        acc.session_string = encrypt_value(session_str)
         with open(zip_path, "rb") as f:
-            acc.tdata_blob = base64.b64encode(f.read()).decode("utf-8")
+            acc.tdata_blob = encrypt_value(base64.b64encode(f.read()).decode("utf-8"))
         db.commit()
 
-        # Start the live client
-        ok = await tg.start_client(acc)
-        if ok:
-            acc.is_active = True
-            db.commit()
-
-        return {"id": acc.id, "name": acc.name, "phone": acc.phone, "ok": True}
+        if owns_telegram_runtime():
+            runtime_result = await tg.reconnect_account_runtime(acc.id, requested_by="import-tdata")
+        else:
+            runtime_result = await _forward_or_fail("POST", f"/internal/runtime/accounts/{acc.id}/reconnect")
+        return {"id": acc.id, "name": acc.name, "phone": acc.phone, "ok": True, "runtime": runtime_result}
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"tdata import failed: {e}", exc_info=True)
-        # Clean up account if created
+        logger.error("tdata import failed: %s", e, exc_info=True)
         try:
             acc_check = db.query(Account).filter(Account.phone == phone).first()
             if acc_check:
@@ -267,7 +349,8 @@ async def delete_account(account_id: int, db: Session = Depends(get_db)):
     acc = db.query(Account).filter(Account.id == account_id).first()
     if not acc:
         raise HTTPException(404, "Account not found")
-    await tg.stop_client(account_id)
+    if owns_telegram_runtime():
+        await tg.stop_client(account_id)
     db.delete(acc)
     db.commit()
     return {"ok": True}
