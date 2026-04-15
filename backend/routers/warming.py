@@ -184,7 +184,7 @@ def list_warmings(db: Session = Depends(get_db)):
 
 
 @router.post("/accounts/{account_id}/start")
-def start_warming(account_id: int, data: WarmingStart, db: Session = Depends(get_db)):
+async def start_warming(account_id: int, data: WarmingStart, db: Session = Depends(get_db)):
     acc = db.query(Account).filter(Account.id == account_id).first()
     if not acc:
         raise HTTPException(404, "Account not found")
@@ -241,7 +241,7 @@ def pause_warming(account_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/accounts/{account_id}/resume")
-def resume_warming(account_id: int, db: Session = Depends(get_db)):
+async def resume_warming(account_id: int, db: Session = Depends(get_db)):
     w = db.query(AccountWarming).filter(AccountWarming.account_id == account_id).first()
     if not w or w.status not in ("paused",):
         raise HTTPException(400, "Nothing to resume")
