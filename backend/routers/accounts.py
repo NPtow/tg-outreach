@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import logging
 import os
@@ -122,6 +123,27 @@ def get_account_health(account_id: int, db: Session = Depends(get_db)):
     return _serialize_account(acc)
 
 
+def _generate_device_params(account_id: int) -> dict:
+    """Generate unique but consistent device fingerprint via opentele.
+    Mimics real Telegram Desktop — makes the client invisible among normal users."""
+    try:
+        from opentele.api import API as TgAPI
+        api = TgAPI.TelegramDesktop.Generate(unique_id=str(account_id))
+        return {
+            "device_model": api.device_model,
+            "system_version": api.system_version,
+            "app_version": "6.7.5 x64",
+            "lang_code": "ru",
+        }
+    except Exception:
+        return {
+            "device_model": "Desktop",
+            "system_version": "Windows 10",
+            "app_version": "6.7.5 x64",
+            "lang_code": "ru",
+        }
+
+
 @router.post("/")
 def create_account(data: AccountCreate, db: Session = Depends(get_db)):
     existing = db.query(Account).filter(Account.phone == data.phone).first()
@@ -140,6 +162,12 @@ def create_account(data: AccountCreate, db: Session = Depends(get_db)):
         session_source="phone_code",
     )
     db.add(acc)
+    db.flush()  # get acc.id before commit
+    params = _generate_device_params(acc.id)
+    acc.device_model = params["device_model"]
+    acc.system_version = params["system_version"]
+    acc.app_version = params["app_version"]
+    acc.lang_code = params["lang_code"]
     db.commit()
     db.refresh(acc)
     return {"id": acc.id, "name": acc.name, "phone": acc.phone}

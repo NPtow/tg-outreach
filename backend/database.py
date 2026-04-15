@@ -25,7 +25,7 @@ def get_db():
 
 
 def init_db():
-    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact, Contact, ContactBatch, RuntimeEvent  # noqa
+    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact, Contact, ContactBatch, RuntimeEvent, WarmingProfile, AccountWarming, WarmingAction, WarmingChannelPool  # noqa
     Base.metadata.create_all(bind=engine)
 
     # Add new columns to existing tables (safe to re-run — errors for existing columns are swallowed)
@@ -82,6 +82,13 @@ def init_db():
         ("settings", "provider TEXT DEFAULT 'openai'"),
         ("settings", "anthropic_key TEXT DEFAULT ''"),
         ("settings", "base_url TEXT DEFAULT ''"),
+        # device fingerprint fields on accounts
+        ("accounts", "device_model TEXT"),
+        ("accounts", "system_version TEXT"),
+        ("accounts", "app_version TEXT"),
+        ("accounts", "lang_code TEXT"),
+        # warming gate on campaigns
+        ("campaigns", "min_health_score INTEGER DEFAULT 0"),
     ]
     with engine.connect() as conn:
         for table, col_def in new_cols:

@@ -6,6 +6,7 @@ import Contacts from "./pages/Contacts";
 import Conversations from "./pages/Conversations";
 import Prompts from "./pages/Prompts";
 import Settings from "./pages/Settings";
+import Warming from "./pages/Warming";
 import { useWS } from "./ws";
 
 function ErrorToast() {
@@ -56,6 +57,7 @@ const NAV = [
   { to: "/campaigns", label: "Campaigns", icon: "📢" },
   { to: "/contacts", label: "Contacts", icon: "👥" },
   { to: "/prompts", label: "Prompts", icon: "🧠" },
+  { to: "/warming", label: "Warming", icon: "🔥" },
   { to: "/settings", label: "Settings", icon: "⚙️" },
 ];
 
@@ -102,6 +104,7 @@ export default function App() {
             <Route path="/campaigns" element={<Campaigns />} />
             <Route path="/contacts" element={<Contacts />} />
             <Route path="/prompts" element={<Prompts />} />
+            <Route path="/warming" element={<Warming />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>

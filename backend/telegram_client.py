@@ -84,7 +84,14 @@ def _make_client(account: Account) -> TelegramClient:
         session = StringSession(session_string)
     else:
         session = _session_path(account.id)
-    return TelegramClient(session, int(account.app_id), app_hash, proxy=proxy)
+    return TelegramClient(
+        session, int(account.app_id), app_hash, proxy=proxy,
+        device_model=getattr(account, "device_model", None) or "Desktop",
+        system_version=getattr(account, "system_version", None) or "Windows 10",
+        app_version=getattr(account, "app_version", None) or "6.7.5 x64",
+        lang_code=getattr(account, "lang_code", None) or "ru",
+        system_lang_code="ru-RU",
+    )
 
 
 def _utcnow() -> datetime:
