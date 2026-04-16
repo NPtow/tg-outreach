@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from backend.database import get_db
 from backend.models import AccountWarming, WarmingProfile, WarmingAction, WarmingChannelPool, Account
-from backend.warming_worker import WarmingWorker, _workers, start_all_warming_tasks
+from backend.warming_worker import WarmingWorker, _normalize_blocked_actions, _workers, start_all_warming_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,7 @@ class ChannelCreate(BaseModel):
     niche: Optional[str] = None
     language: str = "ru"
     subscriber_count: Optional[int] = None
+    invite_link: Optional[str] = None
 
 
 class ChannelImport(BaseModel):
@@ -212,6 +213,7 @@ async def start_warming(account_id: int, data: WarmingStart, db: Session = Depen
         existing.last_decision = None
         existing.last_error_at = None
         existing.last_error_message = None
+        existing.blocked_actions = "{}"
         existing.health_score = 0
         existing.total_actions = 0
         existing.actions_today = 0
@@ -349,6 +351,7 @@ def _warming_dict(w: AccountWarming) -> dict:
         "last_decision": w.last_decision,
         "last_error_at": w.last_error_at,
         "last_error_message": w.last_error_message,
+        "blocked_actions": _normalize_blocked_actions(w.blocked_actions),
         "online_sessions_today": w.online_sessions_today or 0,
         "subscriptions_today": w.subscriptions_today or 0,
         "reactions_today": w.reactions_today or 0,
@@ -408,6 +411,7 @@ def add_channel(data: ChannelCreate, db: Session = Depends(get_db)):
         niche=data.niche,
         language=data.language,
         subscriber_count=data.subscriber_count,
+        invite_link=data.invite_link,
     )
     db.add(c)
     db.commit()
@@ -427,6 +431,7 @@ def import_channels(data: ChannelImport, db: Session = Depends(get_db)):
                 niche=ch.niche,
                 language=ch.language,
                 subscriber_count=ch.subscriber_count,
+                invite_link=ch.invite_link,
             ))
             added += 1
     db.commit()
@@ -461,6 +466,14 @@ def _channel_dict(c: WarmingChannelPool) -> dict:
         "niche": c.niche,
         "language": c.language,
         "subscriber_count": c.subscriber_count,
+        "entity_type": c.entity_type,
+        "peer_id": c.peer_id,
+        "access_hash": c.access_hash,
+        "invite_link": c.invite_link,
+        "verification_status": c.verification_status,
+        "last_verified_at": c.last_verified_at,
+        "last_resolve_error": c.last_resolve_error,
+        "resolve_fail_count": c.resolve_fail_count,
         "is_active": c.is_active,
         "added_at": c.added_at,
     }

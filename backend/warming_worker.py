@@ -22,6 +22,7 @@ from telethon.errors import (
     ChatWriteForbiddenError,
     FloodWaitError,
     PeerFloodError,
+    RPCError,
     UserNotMutualContactError,
     UserPrivacyRestrictedError,
 )
@@ -29,7 +30,7 @@ from telethon.tl.functions.account import UpdateStatusRequest
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.contacts import SearchRequest
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import ReactionEmoji
+from telethon.tl.types import InputChannel, ReactionEmoji
 
 from backend.database import SessionLocal
 from backend.models import Account, AccountWarming, WarmingAction, WarmingChannelPool
@@ -158,6 +159,46 @@ def _loads_json(raw: Optional[str], default: Any):
         return default
 
 
+def _parse_iso_datetime(raw: Optional[str]) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _normalize_blocked_actions(raw: Optional[str]) -> dict[str, dict[str, Any]]:
+    blocks = _loads_json(raw, {})
+    if not isinstance(blocks, dict):
+        return {}
+
+    normalized: dict[str, dict[str, Any]] = {}
+    now = datetime.utcnow()
+    for action_key, entry in blocks.items():
+        if not isinstance(entry, dict):
+            continue
+        until = _parse_iso_datetime(entry.get("until"))
+        if until and until <= now:
+            continue
+        normalized[action_key] = {
+            "reason": entry.get("reason", "temporarily_blocked"),
+            "until": until.isoformat() if until else None,
+            "details": entry.get("details") if isinstance(entry.get("details"), dict) else {},
+        }
+    return normalized
+
+
+def _get_active_block(blocked_actions: dict[str, Any], action_key: str) -> Optional[dict[str, Any]]:
+    block = blocked_actions.get(action_key)
+    if not isinstance(block, dict):
+        return None
+    until = _parse_iso_datetime(block.get("until"))
+    if until and until <= datetime.utcnow():
+        return None
+    return block
+
+
 def _reset_daily_counters(warming: AccountWarming):
     today = date.today()
     if warming.actions_today_date == today:
@@ -230,6 +271,54 @@ def _touch_warming(warming_id: int, **updates):
     except Exception:
         db.rollback()
         logger.exception("Failed to update warming heartbeat", extra={"warming_id": warming_id})
+    finally:
+        db.close()
+
+
+def _block_action(
+    warming_id: int,
+    action_key: str,
+    *,
+    reason: str,
+    cooldown: timedelta,
+    details: Optional[dict[str, Any]] = None,
+):
+    db = SessionLocal()
+    try:
+        warming = db.query(AccountWarming).filter(AccountWarming.id == warming_id).first()
+        if not warming:
+            return
+        blocks = _normalize_blocked_actions(warming.blocked_actions)
+        until = datetime.utcnow() + cooldown
+        blocks[action_key] = {
+            "reason": reason,
+            "until": until.isoformat(),
+            "details": details or {},
+        }
+        warming.blocked_actions = json.dumps(blocks)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to block warming action", extra={"warming_id": warming_id, "action_key": action_key})
+    finally:
+        db.close()
+
+
+def _clear_action_block(warming_id: int, action_key: str):
+    db = SessionLocal()
+    try:
+        warming = db.query(AccountWarming).filter(AccountWarming.id == warming_id).first()
+        if not warming:
+            return
+        blocks = _normalize_blocked_actions(warming.blocked_actions)
+        if action_key not in blocks:
+            return
+        blocks.pop(action_key, None)
+        warming.blocked_actions = json.dumps(blocks)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to clear warming action block", extra={"warming_id": warming_id, "action_key": action_key})
     finally:
         db.close()
 
@@ -327,23 +416,129 @@ def _get_peer_clients(warming_id: int) -> list[tuple[int, int]]:
         db.close()
 
 
-def _pick_channels(warming_id: int, count: int) -> list[str]:
+def _channel_candidate(channel: WarmingChannelPool) -> dict[str, Any]:
+    return {
+        "username": channel.username,
+        "title": channel.title,
+        "verification_status": channel.verification_status or "unknown",
+        "entity_type": channel.entity_type,
+        "peer_id": channel.peer_id,
+        "access_hash": channel.access_hash,
+        "invite_link": channel.invite_link,
+        "resolve_fail_count": channel.resolve_fail_count or 0,
+    }
+
+
+def _channel_input(candidate: Optional[dict[str, Any]]) -> Optional[InputChannel]:
+    if not candidate:
+        return None
+    peer_id = candidate.get("peer_id")
+    access_hash = candidate.get("access_hash")
+    if peer_id is None or access_hash is None:
+        return None
+    try:
+        return InputChannel(int(peer_id), int(access_hash))
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_channel_verification(
+    username: str,
+    entity: Any,
+    *,
+    resolution_method: Optional[str] = None,
+):
+    db = SessionLocal()
+    try:
+        channel = (
+            db.query(WarmingChannelPool)
+            .filter(WarmingChannelPool.username == username.lstrip("@"))
+            .first()
+        )
+        if not channel:
+            return
+        channel.entity_type = entity.__class__.__name__
+        channel.peer_id = str(getattr(entity, "id", ""))
+        access_hash = getattr(entity, "access_hash", None)
+        channel.access_hash = str(access_hash) if access_hash is not None else None
+        if not channel.title:
+            channel.title = getattr(entity, "title", None)
+        channel.verification_status = "verified"
+        channel.last_verified_at = datetime.utcnow()
+        channel.last_resolve_error = None
+        channel.resolve_fail_count = 0
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Failed to persist warming channel verification",
+            extra={"username": username, "resolution_method": resolution_method},
+        )
+    finally:
+        db.close()
+
+
+def _record_channel_resolve_failure(username: str, error_message: str):
+    db = SessionLocal()
+    try:
+        channel = (
+            db.query(WarmingChannelPool)
+            .filter(WarmingChannelPool.username == username.lstrip("@"))
+            .first()
+        )
+        if not channel:
+            return
+        channel.resolve_fail_count = (channel.resolve_fail_count or 0) + 1
+        channel.last_resolve_error = error_message
+        if (channel.resolve_fail_count or 0) >= 3:
+            channel.verification_status = "resolve_failed"
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to persist warming channel resolve failure", extra={"username": username})
+    finally:
+        db.close()
+
+
+def _get_channel_candidate_by_username(username: str) -> Optional[dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        channel = (
+            db.query(WarmingChannelPool)
+            .filter(WarmingChannelPool.username == username.lstrip("@"))
+            .first()
+        )
+        return _channel_candidate(channel) if channel else None
+    finally:
+        db.close()
+
+
+def _pick_channels(warming_id: int, count: int, *, verified_only: bool = False) -> list[dict[str, Any]]:
     db = SessionLocal()
     try:
         warming = db.query(AccountWarming).filter(AccountWarming.id == warming_id).first()
         subscribed = _loads_json(warming.subscribed_channels if warming else "[]", [])
-        pool = (
+        query = (
             db.query(WarmingChannelPool)
             .filter(
                 WarmingChannelPool.is_active.is_(True),
                 WarmingChannelPool.username.notin_(subscribed),
             )
-            .all()
         )
+        if verified_only:
+            query = query.filter(WarmingChannelPool.verification_status == "verified")
+        pool = query.all()
         if not pool:
             return []
-        chosen = random.sample(pool, min(count, len(pool)))
-        return [channel.username for channel in chosen]
+        random.shuffle(pool)
+        pool.sort(
+            key=lambda channel: (
+                0 if (channel.verification_status or "unknown") == "verified" else 1,
+                channel.resolve_fail_count or 0,
+            )
+        )
+        chosen = pool[: min(count, len(pool))]
+        return [_channel_candidate(channel) for channel in chosen]
     finally:
         db.close()
 
@@ -377,6 +572,7 @@ def _get_warming_state(warming_id: int) -> Optional[dict[str, Any]]:
             "phase": warming.phase,
             "peer_account_ids": _loads_json(warming.peer_account_ids, []),
             "subscribed_channels": _loads_json(warming.subscribed_channels, []),
+            "blocked_actions": _normalize_blocked_actions(warming.blocked_actions),
             "online_sessions_today": warming.online_sessions_today or 0,
             "subscriptions_today": warming.subscriptions_today or 0,
             "reactions_today": warming.reactions_today or 0,
@@ -553,23 +749,62 @@ async def _mutual_message(warming_id: int, peer_account_id: int) -> dict[str, An
         raise ActionSkip("chat_write_forbidden")
 
 
-async def _subscribe_channel(client: TelegramClient, warming_id: int, username: str) -> dict[str, Any]:
+async def _subscribe_channel(
+    client: TelegramClient,
+    warming_id: int,
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
     await asyncio.sleep(gaussian_delay(5, 2, 2))
+    username = candidate["username"]
+    current_account_id = _get_warming_account_id(warming_id)
     try:
-        await client(JoinChannelRequest(username))
+        cached_input = _channel_input(candidate)
+        resolution_method = "username"
+
+        if cached_input is not None:
+            try:
+                await client(JoinChannelRequest(cached_input))
+                entity = await client.get_entity(cached_input)
+                resolution_method = "cached_peer"
+            except Exception:
+                entity = None
+        else:
+            entity = None
+
+        if entity is None:
+            try:
+                await client(JoinChannelRequest(username))
+                entity = await client.get_entity(username)
+                _record_channel_verification(username, entity, resolution_method="username")
+            except Exception as username_exc:
+                resolved = await _resolve_channel_via_any_client(
+                    username,
+                    exclude_account_id=current_account_id,
+                )
+                resolved_input = _channel_input(resolved) if resolved else None
+                if resolved_input is None:
+                    raise username_exc
+                await client(JoinChannelRequest(resolved_input))
+                entity = await client.get_entity(resolved_input)
+                resolution_method = "peer_verified"
+
         _mark_subscribed(warming_id, username)
         await asyncio.sleep(gaussian_delay(6, 2, 2))
-        entity = await client.get_entity(username)
         message_count = random.randint(3, 8)
         await client.get_messages(entity, limit=message_count)
         await asyncio.sleep(gaussian_delay(25, 12, 8))
-        return {"channel": username, "messages_read": message_count}
+        return {
+            "channel": username,
+            "messages_read": message_count,
+            "resolution_method": resolution_method,
+        }
     except ChannelPrivateError:
         raise ActionSkip("private_channel")
 
 
-async def _react_to_post(client: TelegramClient, channel_username: str) -> dict[str, Any]:
-    entity = await client.get_entity(channel_username)
+async def _react_to_post(client: TelegramClient, candidate: dict[str, Any]) -> dict[str, Any]:
+    entity, resolution_method = await _resolve_channel_entity(client, candidate)
+    channel_username = candidate["username"]
     messages = await client.get_messages(entity, limit=10)
     if not messages:
         raise ActionSkip("no_recent_messages")
@@ -584,7 +819,12 @@ async def _react_to_post(client: TelegramClient, channel_username: str) -> dict[
             reaction=[ReactionEmoji(emoticon=reaction)],
         )
     )
-    return {"channel": channel_username, "message_id": target.id, "reaction": reaction}
+    return {
+        "channel": channel_username,
+        "message_id": target.id,
+        "reaction": reaction,
+        "resolution_method": resolution_method,
+    }
 
 
 async def _search(client: TelegramClient, query: str) -> dict[str, Any]:
@@ -599,6 +839,102 @@ async def _read_dialogs(client: TelegramClient) -> dict[str, Any]:
         await client.get_messages(dialog, limit=random.randint(3, 6))
         await asyncio.sleep(gaussian_delay(20, 10, 5))
     return {"dialogs_read": len(dialogs)}
+
+
+def _is_frozen_search_error(exc: Exception) -> bool:
+    if not isinstance(exc, RPCError):
+        return False
+    return "FROZEN_METHOD_INVALID" in str(exc).upper()
+
+
+def _is_username_resolve_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "no user has" in message
+        or "nobody is using this username" in message
+        or "cannot find any entity" in message
+        or "username not occupied" in message
+    )
+
+
+async def _resolve_channel_via_any_client(username: str, *, exclude_account_id: Optional[int] = None) -> Optional[dict[str, Any]]:
+    from backend.telegram_client import _clients
+
+    normalized_username = username.lstrip("@")
+    for account_id, resolver in _clients.items():
+        if exclude_account_id is not None and account_id == exclude_account_id:
+            continue
+        try:
+            entity = await resolver.get_entity(normalized_username)
+            _record_channel_verification(normalized_username, entity, resolution_method="resolver_client")
+            access_hash = getattr(entity, "access_hash", None)
+            return {
+                "username": normalized_username,
+                "verification_status": "verified",
+                "entity_type": entity.__class__.__name__,
+                "peer_id": str(getattr(entity, "id", "")),
+                "access_hash": str(access_hash) if access_hash is not None else None,
+                "invite_link": None,
+                "resolve_fail_count": 0,
+            }
+        except Exception:
+            continue
+    return None
+
+
+async def _resolve_channel_entity(
+    client: TelegramClient,
+    candidate: dict[str, Any],
+) -> tuple[Any, str]:
+    cached_input = _channel_input(candidate)
+    username = candidate["username"]
+
+    if cached_input is not None:
+        try:
+            entity = await client.get_entity(cached_input)
+            return entity, "cached_peer"
+        except Exception:
+            pass
+
+    entity = await client.get_entity(username)
+    _record_channel_verification(username, entity, resolution_method="username")
+    return entity, "username"
+
+
+def _handle_action_success(warming_id: int, action: PlannedAction, details: Optional[dict[str, Any]]):
+    if action.action_type == "search":
+        _clear_action_block(warming_id, "search")
+        return
+
+    if action.action_type == "subscribe" and details:
+        if details.get("resolution_method") == "username":
+            _clear_action_block(warming_id, "subscribe_username_resolve")
+
+
+def _handle_action_failure(warming_id: int, action: PlannedAction, exc: Exception):
+    if action.action_type == "search" and _is_frozen_search_error(exc):
+        _block_action(
+            warming_id,
+            "search",
+            reason="FROZEN_METHOD_INVALID",
+            cooldown=timedelta(hours=48),
+            details={"error": str(exc)},
+        )
+        return
+
+    if action.action_type != "subscribe":
+        return
+
+    if _is_username_resolve_error(exc):
+        if action.target:
+            _record_channel_resolve_failure(action.target, str(exc))
+        _block_action(
+            warming_id,
+            "subscribe_username_resolve",
+            reason="username_resolve_failed",
+            cooldown=timedelta(hours=24),
+            details={"target": action.target, "error": str(exc)},
+        )
 
 
 class WarmingWorker:
@@ -755,6 +1091,7 @@ class WarmingWorker:
 
         try:
             details = await action.runner()
+            _handle_action_success(self.warming_id, action, details)
             _finish_action(action_id, "success", details=details)
             return "success"
         except ActionSkip as exc:
@@ -788,6 +1125,7 @@ class WarmingWorker:
                 self.warming_id,
                 extra={"action_type": action.action_type, "target": action.target},
             )
+            _handle_action_failure(self.warming_id, action, exc)
             _finish_action(
                 action_id,
                 "failed",
@@ -807,6 +1145,7 @@ class WarmingWorker:
 
         actions: list[PlannedAction] = []
         skipped: list[dict[str, Any]] = []
+        blocked_actions = state.get("blocked_actions", {})
 
         def remaining(config_key: str, counter_key: str) -> int:
             return max(0, int(config.get(config_key, 0) or 0) - int(state.get(counter_key, 0) or 0))
@@ -824,7 +1163,10 @@ class WarmingWorker:
 
         mutual_left = remaining("mutual_messages_per_day", "mutual_messages_today")
         if mutual_left > 0:
-            peers = _get_peer_clients(self.warming_id)
+            if state.get("peer_account_ids"):
+                peers = _get_peer_clients(self.warming_id)
+            else:
+                peers = []
             if peers:
                 peer_account_id, _ = random.choice(peers)
                 peer_phone = _get_account_phone(peer_account_id) or str(peer_account_id)
@@ -836,27 +1178,27 @@ class WarmingWorker:
                         decision_context={"quota_remaining": mutual_left, "peer_account_id": peer_account_id},
                     )
                 )
-            else:
-                skipped.append(
-                    {
-                        "action_type": "msg_sent",
-                        "target": None,
-                        "reason": "no_peer_accounts",
-                        "decision_context": {"quota_remaining": mutual_left, "phase": state["phase"]},
-                    }
-                )
 
         subscriptions_left = remaining("subscriptions_per_day", "subscriptions_today")
         if subscriptions_left > 0:
-            channels = _pick_channels(self.warming_id, min(1, subscriptions_left))
+            resolve_block = _get_active_block(blocked_actions, "subscribe_username_resolve")
+            channels = _pick_channels(
+                self.warming_id,
+                min(1, subscriptions_left),
+                verified_only=resolve_block is not None,
+            )
             if channels:
                 for channel in channels:
                     actions.append(
                         PlannedAction(
                             action_type="subscribe",
-                            target=channel,
+                            target=channel["username"],
                             runner=lambda ch=channel: _subscribe_channel(client, self.warming_id, ch),
-                            decision_context={"quota_remaining": subscriptions_left, "phase": state["phase"]},
+                            decision_context={
+                                "quota_remaining": subscriptions_left,
+                                "phase": state["phase"],
+                                "verification_status": channel.get("verification_status"),
+                            },
                         )
                     )
             else:
@@ -864,8 +1206,12 @@ class WarmingWorker:
                     {
                         "action_type": "subscribe",
                         "target": None,
-                        "reason": "no_available_channels",
-                        "decision_context": {"quota_remaining": subscriptions_left, "phase": state["phase"]},
+                        "reason": "no_verified_channels_available" if resolve_block else "no_available_channels",
+                        "decision_context": {
+                            "quota_remaining": subscriptions_left,
+                            "phase": state["phase"],
+                            "blocked": resolve_block,
+                        },
                     }
                 )
 
@@ -878,7 +1224,10 @@ class WarmingWorker:
                     PlannedAction(
                         action_type="react",
                         target=channel,
-                        runner=lambda ch=channel: _react_to_post(client, ch),
+                        runner=lambda ch=channel: _react_to_post(
+                            client,
+                            _get_channel_candidate_by_username(ch) or {"username": ch},
+                        ),
                         decision_context={"quota_remaining": reactions_left, "phase": state["phase"]},
                     )
                 )
@@ -893,7 +1242,8 @@ class WarmingWorker:
                 )
 
         searches_left = remaining("searches_per_day", "searches_today")
-        if searches_left > 0:
+        search_block = _get_active_block(blocked_actions, "search")
+        if searches_left > 0 and search_block is None:
             query = random.choice(_SEARCH_QUERIES)
             actions.append(
                 PlannedAction(

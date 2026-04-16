@@ -222,6 +222,7 @@ class AccountWarming(Base):
     last_decision = Column(String(100), nullable=True)
     last_error_at = Column(DateTime, nullable=True)
     last_error_message = Column(Text, nullable=True)
+    blocked_actions = Column(Text, default="{}")      # JSON map[action_key] -> {reason, until, details}
     health_score = Column(Integer, default=0)        # 0–100
     subscribed_channels = Column(Text, default="[]") # JSON list[str]
     peer_account_ids = Column(Text, default="[]")    # JSON list[int] — accounts to mutual-msg with
@@ -270,6 +271,14 @@ class WarmingChannelPool(Base):
     niche = Column(String(50), nullable=True)     # tech|business|general|crypto|marketing|news|humor
     language = Column(String(10), default="ru")
     subscriber_count = Column(Integer, nullable=True)
+    entity_type = Column(String(30), nullable=True)
+    peer_id = Column(String(50), nullable=True)
+    access_hash = Column(String(50), nullable=True)
+    invite_link = Column(String(300), nullable=True)
+    verification_status = Column(String(20), default="unknown")  # unknown|verified|resolve_failed
+    last_verified_at = Column(DateTime, nullable=True)
+    last_resolve_error = Column(Text, nullable=True)
+    resolve_fail_count = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
     added_at = Column(DateTime, default=datetime.utcnow)
 
