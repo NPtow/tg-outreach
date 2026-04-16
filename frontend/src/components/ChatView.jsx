@@ -6,13 +6,13 @@ function Bubble({ msg }) {
   const isUser = msg.role === "user";
   return (
     <div className={`flex ${isUser ? "justify-start" : "justify-end"} mb-3`}>
-      <div className={`max-w-[75%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed ${
+      <div className={`max-w-[78%] rounded-3xl px-4 py-3 text-sm leading-relaxed shadow-[0_12px_34px_rgba(0,0,0,0.18)] ${
         isUser
-          ? "bg-zinc-800 text-zinc-100 rounded-tl-sm"
-          : "bg-blue-600 text-white rounded-tr-sm"
+          ? "rounded-tl-md border border-white/8 bg-white/[0.05] text-zinc-100"
+          : "rounded-tr-md bg-[linear-gradient(135deg,#2563eb,#0ea5e9)] text-white"
       }`}>
         <p className="whitespace-pre-wrap">{msg.text}</p>
-        <p className={`text-[10px] mt-1 ${isUser ? "text-zinc-500" : "text-blue-200"}`}>
+        <p className={`mt-1.5 text-[10px] ${isUser ? "text-zinc-500" : "text-sky-100/80"}`}>
           {new Date(msg.created_at).toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" })}
         </p>
       </div>
@@ -56,28 +56,35 @@ export default function ChatView({ convId, onClose, onStatusChange }) {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-800 bg-zinc-900/50">
-        <div>
-          <p className="text-sm font-semibold text-zinc-100">{name}</p>
-          {conv.tg_username && <p className="text-xs text-zinc-500">@{conv.tg_username}</p>}
+      <div className="flex items-center justify-between border-b border-white/8 bg-white/[0.03] px-5 py-4">
+        <div className="min-w-0">
+          <p className="truncate text-base font-semibold text-zinc-100">{name}</p>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+            {conv.tg_username ? <span>@{conv.tg_username}</span> : null}
+            {conv.source_campaign_name ? (
+              <span className="rounded-full border border-sky-400/15 bg-sky-400/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-sky-200">
+                {conv.source_campaign_name}
+              </span>
+            ) : null}
+          </div>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="ml-4 flex items-center gap-1.5">
           {STATUS_BTNS.map(b => (
             <button key={b.key} onClick={() => handleStatus(b.key)}
-              className={`text-xs px-2.5 py-1 rounded-lg transition-colors font-medium ${
+              className={`rounded-xl px-2.5 py-1.5 text-xs font-medium transition-colors ${
                 conv.status === b.key ? b.active : b.idle
               }`}>
               {b.label}
             </button>
           ))}
-          <button onClick={onClose} className="ml-2 w-7 h-7 flex items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors text-lg">
+          <button onClick={onClose} className="ml-2 flex h-9 w-9 items-center justify-center rounded-xl text-lg text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200">
             ×
           </button>
         </div>
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-5 py-4">
+      <div className="flex-1 overflow-y-auto bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.08),transparent_30%),linear-gradient(180deg,rgba(12,12,18,0.88),rgba(8,8,12,0.94))] px-5 py-5">
         {messages.length === 0 && (
           <div className="text-center text-zinc-600 text-sm mt-8">Нет сообщений</div>
         )}
@@ -86,11 +93,11 @@ export default function ChatView({ convId, onClose, onStatusChange }) {
       </div>
 
       {/* Input */}
-      <div className="px-4 py-3.5 border-t border-zinc-800 bg-zinc-900/30">
+      <div className="border-t border-white/8 bg-white/[0.03] px-4 py-4">
         <div className="flex gap-2 items-end">
           <textarea
             rows={1}
-            className="flex-1 bg-zinc-800 border border-zinc-700 rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-blue-500 transition-colors resize-none"
+            className="flex-1 resize-none rounded-2xl border border-white/10 bg-white/[0.05] px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 outline-none transition focus:border-sky-400/40 focus:bg-white/[0.06]"
             placeholder="Написать вручную..."
             value={text}
             onChange={e => setText(e.target.value)}
@@ -99,7 +106,7 @@ export default function ChatView({ convId, onClose, onStatusChange }) {
           <button
             onClick={handleSend}
             disabled={sending || !text.trim()}
-            className="shrink-0 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-xl text-sm font-medium transition-colors"
+            className="shrink-0 rounded-2xl bg-[linear-gradient(135deg,#2563eb,#0ea5e9)] px-4 py-3 text-sm font-medium text-white transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40"
           >
             ↑
           </button>

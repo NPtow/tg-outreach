@@ -1,8 +1,15 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 
 const listeners = new Set();
+const statusListeners = new Set();
 let socket = null;
 let reconnectTimer = null;
+let connectionState = "connecting";
+
+function emitStatus(nextState) {
+  connectionState = nextState;
+  statusListeners.forEach((fn) => fn());
+}
 
 function buildWsUrl() {
   const explicit = import.meta.env.VITE_WS_URL;
@@ -21,6 +28,7 @@ function buildWsUrl() {
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
+  emitStatus("reconnecting");
   reconnectTimer = window.setTimeout(() => {
     reconnectTimer = null;
     connect();
@@ -28,7 +36,11 @@ function scheduleReconnect() {
 }
 
 function connect() {
+  emitStatus(socket ? "connected" : "connecting");
   socket = new WebSocket(buildWsUrl());
+  socket.onopen = () => {
+    emitStatus("connected");
+  };
   socket.onmessage = (e) => {
     try {
       const data = JSON.parse(e.data);
@@ -40,6 +52,7 @@ function connect() {
     scheduleReconnect();
   };
   socket.onerror = () => {
+    emitStatus("error");
     try {
       socket?.close();
     } catch {}
@@ -55,6 +68,19 @@ export function useWS() {
   useEffect(() => {
     if (!socket) connect();
   }, []);
+}
+
+function subscribeStatus(listener) {
+  statusListeners.add(listener);
+  return () => statusListeners.delete(listener);
+}
+
+function getStatusSnapshot() {
+  return connectionState;
+}
+
+export function useWsStatus() {
+  return useSyncExternalStore(subscribeStatus, getStatusSnapshot, getStatusSnapshot);
 }
 
 export function useWsEvent(fn) {

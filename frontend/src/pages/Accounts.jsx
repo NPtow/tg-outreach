@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { EmptyState, PageHeader, Surface } from "../components/workspace";
 import { useWsEvent } from "../ws";
 
 const STEPS = { FORM: "form", CODE: "code", DONE: "done" };
@@ -382,37 +383,44 @@ export default function Accounts() {
     }
   };
 
-  return (
-    <div className="p-8 max-w-5xl">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-semibold text-zinc-100">Accounts</h1>
-          <p className="text-sm text-zinc-500 mt-0.5">Health-aware runtime для Telegram аккаунтов</p>
-        </div>
-        <div className="flex gap-2">
-          <button onClick={() => setShowTdata(true)} className="btn-secondary">+ Import tdata</button>
-          <button onClick={() => setShowModal(true)} className="btn-primary">+ Add Account</button>
-        </div>
-      </div>
+  const readyCount = accounts.filter((account) => account.eligibility_state === "eligible").length;
+  const needsReauthCount = accounts.filter((account) => account.needs_reauth).length;
+  const onlineCount = accounts.filter((account) => account.connection_state === "online").length;
 
-      <div className={`mb-4 rounded-xl border px-4 py-3 text-sm ${runtime?.ok ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300" : "border-red-500/20 bg-red-500/10 text-red-300"}`}>
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="Runtime"
+        title="Accounts"
+        description="Health-aware control plane for Telegram sessions, proxies, reauth, and safe campaign readiness."
+        actions={(
+          <>
+            <button onClick={() => setShowTdata(true)} className="btn-secondary">+ Import tdata</button>
+            <button onClick={() => setShowModal(true)} className="btn-primary">+ Add Account</button>
+          </>
+        )}
+        stats={[
+          { label: "Accounts", value: accounts.length, tone: "neutral", caption: "Configured identities" },
+          { label: "Campaign ready", value: readyCount, tone: readyCount ? "emerald" : "neutral", caption: "Eligible to launch" },
+          { label: "Live now", value: onlineCount, tone: onlineCount ? "blue" : "neutral", caption: "Connected workers" },
+          { label: "Needs reauth", value: needsReauthCount, tone: needsReauthCount ? "amber" : "neutral", caption: "Manual recovery queue" },
+        ]}
+      />
+
+      <Surface className={`px-5 py-4 text-sm ${runtime?.ok ? "border-emerald-400/15 bg-[linear-gradient(180deg,rgba(14,30,27,0.96),rgba(10,15,17,0.94))] text-emerald-200" : "border-rose-400/15 bg-[linear-gradient(180deg,rgba(44,16,24,0.96),rgba(12,10,14,0.94))] text-rose-200"}`}>
         {runtime?.ok
           ? `Telegram worker online · role: ${runtime.role}`
           : "Telegram worker unreachable. Reconnect/start commands будут недоступны."}
-      </div>
+      </Surface>
 
       {accounts.length === 0 ? (
-        <div className="border border-dashed border-zinc-700 rounded-2xl p-12 text-center">
-          <div className="text-4xl mb-3">👤</div>
-          <p className="text-zinc-400 text-sm font-medium mb-1">Нет аккаунтов</p>
-          <p className="text-zinc-600 text-xs">Добавь Telegram аккаунт чтобы начать</p>
-        </div>
+        <EmptyState icon="👤" title="No Telegram accounts yet" description="Добавьте первый аккаунт или импортируйте tdata, чтобы включить campaigns, inbox monitoring и warming." />
       ) : (
         <div className="space-y-3">
           {accounts.map((acc) => {
             const assignedPrompt = prompts.find((p) => p.id === acc.prompt_template_id);
             return (
-              <div key={acc.id} className="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4 hover:border-zinc-700 transition-colors">
+              <Surface key={acc.id} className="px-5 py-4 transition-colors hover:border-white/16">
                 <div className="flex items-start justify-between gap-4">
                   <div className="space-y-3 flex-1 min-w-0">
                     <div className="flex items-center gap-3">
@@ -506,7 +514,7 @@ export default function Accounts() {
                     )}
                   </div>
                 </div>
-              </div>
+              </Surface>
             );
           })}
         </div>

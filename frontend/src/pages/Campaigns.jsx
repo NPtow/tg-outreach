@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { EmptyState, PageHeader, Surface } from "../components/workspace";
 import { useWsEvent } from "../ws";
 
 const STATUS = {
@@ -512,22 +513,27 @@ export default function Campaigns() {
     return `${names[0]} +${names.length - 1}`;
   };
 
+  const runningCount = campaigns.filter((campaign) => campaign.is_running).length;
+  const totalSent = campaigns.reduce((sum, campaign) => sum + (campaign.sent || 0), 0);
+  const totalFailed = campaigns.reduce((sum, campaign) => sum + (campaign.failed || 0), 0);
+
   return (
-    <div className="p-8 max-w-4xl">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-semibold text-zinc-100">Campaigns</h1>
-          <p className="text-sm text-zinc-500 mt-0.5">Точечные рассылки с контролем лимитов</p>
-        </div>
-        <button onClick={() => setShowModal(true)} className="btn-primary">+ New Campaign</button>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="Execution"
+        title="Campaigns"
+        description="Точечные outreach-волны с контролем задержек, лимитов, окна отправки и стоп-правил по ответам."
+        actions={<button onClick={() => setShowModal(true)} className="btn-primary">+ New Campaign</button>}
+        stats={[
+          { label: "Campaigns", value: campaigns.length, tone: "neutral", caption: "Configured waves" },
+          { label: "Running", value: runningCount, tone: runningCount ? "emerald" : "neutral", caption: "Currently in motion" },
+          { label: "Sent", value: totalSent, tone: totalSent ? "blue" : "neutral", caption: "Delivered messages" },
+          { label: "Failed", value: totalFailed, tone: totalFailed ? "rose" : "neutral", caption: totalFailed ? "Needs retry or review" : "No failures logged" },
+        ]}
+      />
 
       {campaigns.length === 0 ? (
-        <div className="border border-dashed border-zinc-800 rounded-2xl p-12 text-center">
-          <div className="text-4xl mb-3">📢</div>
-          <p className="text-zinc-400 text-sm font-medium mb-1">Нет кампаний</p>
-          <p className="text-zinc-600 text-xs">Создай первую кампанию для точечной рассылки</p>
-        </div>
+        <EmptyState icon="📢" title="No campaigns yet" description="Создайте первую кампанию, чтобы запустить контролируемую рассылку по импортированным контактам." />
       ) : (
         <div className="space-y-3">
           {campaigns.map(c => {
@@ -535,7 +541,7 @@ export default function Campaigns() {
             const st = STATUS[c.status] || STATUS.draft;
             const promptName = prompts.find(p => p.id === c.prompt_template_id)?.name;
             return (
-              <div key={c.id} className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 hover:border-zinc-700 transition-colors">
+              <Surface key={c.id} className="p-5 transition-colors hover:border-white/16">
                 <div className="flex items-start justify-between gap-4 mb-3">
                   <div className="flex items-center gap-3 min-w-0">
                     <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${c.is_running ? "bg-emerald-500 animate-pulse" : "bg-zinc-600"}`} />
@@ -597,7 +603,7 @@ export default function Campaigns() {
                     {startErrors[c.id]}
                   </p>
                 )}
-              </div>
+              </Surface>
             );
           })}
         </div>

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { PageHeader } from "../components/workspace";
 
 function Section({ title, children }) {
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+    <div className="rounded-[26px] border border-white/10 bg-white/[0.04] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">{title}</h3>
       <div className="space-y-4">{children}</div>
     </div>
@@ -20,7 +21,7 @@ function Field({ label, hint, children }) {
   );
 }
 
-const inputCls = "w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 transition-colors";
+const inputCls = "w-full rounded-2xl border border-white/10 bg-black/25 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none transition focus:border-sky-400/40 focus:bg-white/[0.05]";
 
 const PROVIDERS = [
   { value: "openai", label: "OpenAI (GPT)" },
@@ -101,11 +102,12 @@ export default function Settings() {
   if (loading) return <div className="p-8 text-zinc-500 text-sm">Загрузка...</div>;
 
   return (
-    <div className="p-8 max-w-2xl space-y-4">
-      <div className="mb-6">
-        <h1 className="text-xl font-semibold text-zinc-100">Settings</h1>
-        <p className="text-sm text-zinc-500 mt-0.5">Настройки AI-провайдера и авто-ответов</p>
-      </div>
+    <div className="max-w-3xl space-y-4">
+      <PageHeader
+        eyebrow="Control Plane"
+        title="Settings"
+        description="Настройки AI-провайдера, fallback промпта и глобального auto-reply поведения."
+      />
 
       <Section title="AI Провайдер">
         <Field label="Провайдер">

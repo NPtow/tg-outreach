@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { EmptyState, PageHeader, Surface } from "../components/workspace";
 
 function Modal({ title, onClose, children }) {
   return (
@@ -76,34 +77,32 @@ export default function Prompts() {
   };
 
   return (
-    <div className="p-8 max-w-3xl">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-semibold text-zinc-100">Prompt Library</h1>
-          <p className="text-sm text-zinc-500 mt-0.5">Наборы инструкций для GPT-агентов. Назначаются на аккаунт или кампанию.</p>
-        </div>
-        <button onClick={() => setShowCreate(true)} className="btn-primary">+ New Prompt</button>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="AI Layer"
+        title="Prompt Library"
+        description="Наборы системных инструкций для GPT-агентов. Их можно назначать на аккаунт, кампанию или оставить глобальным fallback."
+        actions={<button onClick={() => setShowCreate(true)} className="btn-primary">+ New Prompt</button>}
+        stats={[
+          { label: "Prompt packs", value: prompts.length, tone: prompts.length ? "violet" : "neutral", caption: prompts.length ? "Reusable instructions ready" : "Create your first pack" },
+        ]}
+      />
 
       {/* Global prompt note */}
-      <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 mb-4 flex gap-3 items-start">
+      <Surface className="flex gap-3 items-start p-4">
         <span className="text-lg shrink-0">🌐</span>
         <div>
           <p className="text-sm font-medium text-zinc-300">Глобальный промпт</p>
           <p className="text-xs text-zinc-500 mt-0.5">Используется если аккаунту/кампании не назначен свой. Настраивается в <span className="text-blue-400">Settings → System Prompt</span>.</p>
         </div>
-      </div>
+      </Surface>
 
       {prompts.length === 0 ? (
-        <div className="border border-dashed border-zinc-800 rounded-2xl p-12 text-center">
-          <div className="text-4xl mb-3">🧠</div>
-          <p className="text-zinc-400 text-sm font-medium mb-1">Нет промптов</p>
-          <p className="text-zinc-600 text-xs">Создай первый промпт и назначь его на кампанию или аккаунт</p>
-        </div>
+        <EmptyState icon="🧠" title="No prompt packs yet" description="Создайте первый промпт и назначьте его на аккаунт или кампанию, если глобального недостаточно." />
       ) : (
         <div className="space-y-3">
           {prompts.map(p => (
-            <div key={p.id} className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 hover:border-zinc-700 transition-colors">
+            <Surface key={p.id} className="p-5 transition-colors hover:border-white/16">
               <div className="flex items-start justify-between gap-3 mb-2">
                 <div className="min-w-0">
                   <p className="font-medium text-zinc-100 text-sm">{p.name}</p>
@@ -117,7 +116,7 @@ export default function Prompts() {
               <pre className="text-[11px] text-zinc-500 bg-zinc-950 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap font-mono leading-relaxed max-h-24 overflow-y-auto">
                 {p.system_prompt}
               </pre>
-            </div>
+            </Surface>
           ))}
         </div>
       )}
