@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -320,6 +320,12 @@ def _warming_dict(w: AccountWarming) -> dict:
         .count()
         if db else 0
     )
+    heartbeat_cutoff = datetime.utcnow() - timedelta(minutes=15)
+    is_running = w.id in _workers or (
+        w.status in {"warming", "maintenance"} and
+        w.last_tick_at is not None and
+        w.last_tick_at >= heartbeat_cutoff
+    )
     return {
         "id": w.id,
         "account_id": w.account_id,
@@ -350,7 +356,7 @@ def _warming_dict(w: AccountWarming) -> dict:
         "dialog_reads_today": w.dialog_reads_today or 0,
         "mutual_messages_today": w.mutual_messages_today or 0,
         "current_phase_config": _current_phase_config(w),
-        "is_running": w.id in _workers,
+        "is_running": is_running,
     }
 
 
