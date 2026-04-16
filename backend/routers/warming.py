@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/warming", tags=["warming"])
 _DEFAULT_PHASE1 = json.dumps({
     "online_sessions_per_day": 4,
     "mutual_messages_per_day": 8,
-    "subscriptions_per_day": 0,
+    "subscriptions_per_day": 1,
     "reactions_per_day": 0,
     "searches_per_day": 3,
     "dialog_reads_per_day": 5,
@@ -43,7 +43,7 @@ _DEFAULT_PHASE3 = json.dumps({
 })
 _DEFAULT_MAINTENANCE = json.dumps({
     "online_sessions_per_day": 2,
-    "mutual_messages_per_day": 2,
+    "mutual_messages_per_day": 0,
     "subscriptions_per_day": 0,
     "reactions_per_day": 2,
     "searches_per_day": 1,
@@ -197,6 +197,7 @@ async def start_warming(account_id: int, data: WarmingStart, db: Session = Depen
     if existing:
         if existing.status in ("warming", "maintenance"):
             raise HTTPException(400, "Warming already active for this account")
+        db.query(WarmingAction).filter(WarmingAction.account_warming_id == existing.id).delete()
         # reuse slot
         existing.profile_id = data.profile_id
         existing.status = "warming"
@@ -204,10 +205,25 @@ async def start_warming(account_id: int, data: WarmingStart, db: Session = Depen
         existing.campaign_label = data.campaign_label
         existing.started_at = datetime.utcnow()
         existing.phase_started_at = datetime.utcnow()
+        existing.last_action_at = None
+        existing.last_success_at = None
+        existing.last_tick_at = None
+        existing.next_action_at = None
+        existing.last_decision = None
+        existing.last_error_at = None
+        existing.last_error_message = None
         existing.health_score = 0
         existing.total_actions = 0
         existing.actions_today = 0
+        existing.actions_today_date = None
+        existing.online_sessions_today = 0
+        existing.subscriptions_today = 0
+        existing.reactions_today = 0
+        existing.searches_today = 0
+        existing.dialog_reads_today = 0
+        existing.mutual_messages_today = 0
         existing.ban_events = 0
+        existing.subscribed_channels = "[]"
         existing.peer_account_ids = json.dumps(data.peer_account_ids)
         db.commit()
         w = existing
@@ -236,6 +252,8 @@ def pause_warming(account_id: int, db: Session = Depends(get_db)):
     if worker:
         worker.stop()
     w.status = "paused"
+    w.next_action_at = None
+    w.last_decision = "paused"
     db.commit()
     return {"ok": True}
 
@@ -246,6 +264,7 @@ async def resume_warming(account_id: int, db: Session = Depends(get_db)):
     if not w or w.status not in ("paused",):
         raise HTTPException(400, "Nothing to resume")
     w.status = "warming"
+    w.last_decision = "resumed"
     db.commit()
     worker = WarmingWorker(w.id)
     worker.start()
@@ -261,6 +280,8 @@ def stop_warming(account_id: int, db: Session = Depends(get_db)):
     if worker:
         worker.stop()
     w.status = "completed"
+    w.next_action_at = None
+    w.last_decision = "completed"
     db.commit()
     return {"ok": True}
 
@@ -281,7 +302,7 @@ def get_warming_actions(account_id: int, limit: int = 50, offset: int = 0,
         raise HTTPException(404, "No warming found")
     actions = (db.query(WarmingAction)
                .filter(WarmingAction.account_warming_id == w.id)
-               .order_by(WarmingAction.executed_at.desc())
+               .order_by(WarmingAction.attempted_at.desc(), WarmingAction.executed_at.desc())
                .offset(offset).limit(limit).all())
     total = db.query(WarmingAction).filter(WarmingAction.account_warming_id == w.id).count()
     return {
@@ -291,6 +312,14 @@ def get_warming_actions(account_id: int, limit: int = 50, offset: int = 0,
 
 
 def _warming_dict(w: AccountWarming) -> dict:
+    db = Session.object_session(w)
+    actions_attempted = db.query(WarmingAction).filter(WarmingAction.account_warming_id == w.id).count() if db else 0
+    actions_succeeded = (
+        db.query(WarmingAction)
+        .filter(WarmingAction.account_warming_id == w.id, WarmingAction.result == "success")
+        .count()
+        if db else 0
+    )
     return {
         "id": w.id,
         "account_id": w.account_id,
@@ -301,11 +330,26 @@ def _warming_dict(w: AccountWarming) -> dict:
         "health_score": w.health_score,
         "actions_today": w.actions_today,
         "total_actions": w.total_actions,
+        "actions_attempted": actions_attempted,
+        "actions_succeeded": actions_succeeded,
         "ban_events": w.ban_events,
         "subscribed_channels": json.loads(w.subscribed_channels or "[]"),
         "peer_account_ids": json.loads(w.peer_account_ids or "[]"),
         "started_at": w.started_at,
         "last_action_at": w.last_action_at,
+        "last_success_at": w.last_success_at,
+        "last_tick_at": w.last_tick_at,
+        "next_action_at": w.next_action_at,
+        "last_decision": w.last_decision,
+        "last_error_at": w.last_error_at,
+        "last_error_message": w.last_error_message,
+        "online_sessions_today": w.online_sessions_today or 0,
+        "subscriptions_today": w.subscriptions_today or 0,
+        "reactions_today": w.reactions_today or 0,
+        "searches_today": w.searches_today or 0,
+        "dialog_reads_today": w.dialog_reads_today or 0,
+        "mutual_messages_today": w.mutual_messages_today or 0,
+        "current_phase_config": _current_phase_config(w),
         "is_running": w.id in _workers,
     }
 
@@ -318,8 +362,24 @@ def _action_dict(a: WarmingAction) -> dict:
         "result": a.result,
         "flood_wait_seconds": a.flood_wait_seconds,
         "details": json.loads(a.details) if a.details else None,
+        "error_message": a.error_message,
+        "decision_context": json.loads(a.decision_context) if a.decision_context else None,
+        "attempted_at": a.attempted_at,
+        "completed_at": a.completed_at,
         "executed_at": a.executed_at,
     }
+
+
+def _current_phase_config(w: AccountWarming) -> dict:
+    if w.status == "maintenance":
+        return json.loads(w.profile.maintenance_config or "{}")
+
+    configs = {
+        1: w.profile.phase_1_config,
+        2: w.profile.phase_2_config,
+        3: w.profile.phase_3_config,
+    }
+    return json.loads(configs.get(w.phase, w.profile.phase_3_config) or "{}")
 
 
 # ─── Channel pool ────────────────────────────────────────────────────────────────

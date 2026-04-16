@@ -44,10 +44,57 @@ function StatusBadge({ status, phase }) {
   return <Badge color={phaseColors[phase] || "blue"}>Phase {phase}</Badge>;
 }
 
+function ResultBadge({ result }) {
+  const color =
+    result === "success" ? "green" :
+    result === "failed" ? "red" :
+    result === "flood_wait" ? "yellow" :
+    result === "skipped" ? "zinc" :
+    "blue";
+  return <Badge color={color}>{result}</Badge>;
+}
+
+function formatTs(value) {
+  if (!value) return "—";
+  return new Date(value).toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function describePhase(warming) {
+  const cfg = warming?.current_phase_config || {};
+  if (!warming) return "No active warming";
+  const parts = [];
+  if (cfg.online_sessions_per_day) parts.push(`${cfg.online_sessions_per_day} online/day`);
+  if (cfg.subscriptions_per_day) parts.push(`${cfg.subscriptions_per_day} subscribe/day`);
+  else parts.push("no subscriptions in this phase");
+  if (cfg.searches_per_day) parts.push(`${cfg.searches_per_day} searches/day`);
+  if (cfg.dialog_reads_per_day) parts.push(`${cfg.dialog_reads_per_day} dialog reads/day`);
+  if (cfg.reactions_per_day) parts.push(`${cfg.reactions_per_day} reactions/day`);
+  if (cfg.mutual_messages_per_day) {
+    parts.push(
+      warming.peer_account_ids?.length
+        ? `${cfg.mutual_messages_per_day} peer msgs/day`
+        : "peer msgs only if peers configured"
+    );
+  }
+  return parts.join(" + ");
+}
+
+function actionLabel(action) {
+  if (action.action_type === "online_session") return "online session";
+  if (action.action_type === "read_dialog") return "read dialogs";
+  if (action.action_type === "msg_sent") return "peer message";
+  return action.action_type.replaceAll("_", " ");
+}
+
 const DEFAULT_CONFIG = {
   online_sessions_per_day: 4,
-  mutual_messages_per_day: 6,
-  subscriptions_per_day: 0,
+  mutual_messages_per_day: 4,
+  subscriptions_per_day: 1,
   reactions_per_day: 0,
   searches_per_day: 3,
   dialog_reads_per_day: 4,
@@ -55,12 +102,22 @@ const DEFAULT_CONFIG = {
 
 // ─── Tab: Dashboard ────────────────────────────────────────────────────────────
 
-function TabDashboard({ warmings, accounts, profiles, onRefresh }) {
+function TabDashboard({
+  warmings,
+  accounts,
+  profiles,
+  actions,
+  selectedAccountId,
+  onSelectAccount,
+  onRefresh,
+}) {
   const [starting, setStarting] = useState(null);
   const [form, setForm] = useState({ profileId: "", label: "", peerIds: "" });
   const [showStart, setShowStart] = useState(null); // account_id
 
   const warmingByAccount = Object.fromEntries(warmings.map((w) => [w.account_id, w]));
+  const selectedWarming = warmings.find((w) => w.account_id === selectedAccountId) || null;
+  const selectedAccount = accounts.find((acc) => acc.id === selectedAccountId) || null;
 
   async function doStart(accountId) {
     if (!form.profileId) return;
@@ -92,8 +149,15 @@ function TabDashboard({ warmings, accounts, profiles, onRefresh }) {
     <div className="space-y-3">
       {accounts.map((acc) => {
         const w = warmingByAccount[acc.id];
+        const isSelected = selectedAccountId === acc.id;
         return (
-          <div key={acc.id} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex items-center gap-4">
+          <div
+            key={acc.id}
+            onClick={() => w && onSelectAccount(acc.id)}
+            className={`bg-zinc-900 border rounded-xl p-4 flex items-start gap-4 transition-colors ${
+              isSelected ? "border-blue-500/60" : "border-zinc-800"
+            } ${w ? "cursor-pointer" : ""}`}
+          >
             <HealthGauge score={w?.health_score ?? 0} />
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
@@ -104,13 +168,33 @@ function TabDashboard({ warmings, accounts, profiles, onRefresh }) {
                 {w?.campaign_label && <Badge color="zinc">{w.campaign_label}</Badge>}
               </div>
               {w ? (
-                <div className="flex items-center gap-4 text-xs text-zinc-500">
-                  <span>Today: <b className="text-zinc-300">{w.actions_today}</b></span>
-                  <span>Total: <b className="text-zinc-300">{w.total_actions}</b></span>
-                  <span>Ban events: <b className={w.ban_events > 0 ? "text-red-400" : "text-zinc-300"}>{w.ban_events}</b></span>
-                  <span>Subscribed: <b className="text-zinc-300">{w.subscribed_channels?.length ?? 0}</b></span>
-                  {w.last_action_at && (
-                    <span>Last: <b className="text-zinc-300">{new Date(w.last_action_at).toLocaleTimeString("ru")}</b></span>
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 xl:grid-cols-4 gap-x-4 gap-y-1 text-xs text-zinc-500">
+                    <span>Attempted: <b className="text-zinc-300">{w.actions_attempted}</b></span>
+                    <span>Succeeded: <b className="text-zinc-300">{w.actions_succeeded}</b></span>
+                    <span>Today: <b className="text-zinc-300">{w.actions_today}</b></span>
+                    <span>Total: <b className="text-zinc-300">{w.total_actions}</b></span>
+                    <span>Subs today: <b className="text-zinc-300">{w.subscriptions_today}</b></span>
+                    <span>Searches today: <b className="text-zinc-300">{w.searches_today}</b></span>
+                    <span>Reads today: <b className="text-zinc-300">{w.dialog_reads_today}</b></span>
+                    <span>Peer msgs today: <b className="text-zinc-300">{w.mutual_messages_today}</b></span>
+                    <span>Last tick: <b className="text-zinc-300">{formatTs(w.last_tick_at)}</b></span>
+                    <span>Next action: <b className="text-zinc-300">{formatTs(w.next_action_at)}</b></span>
+                    <span>Last success: <b className="text-zinc-300">{formatTs(w.last_success_at)}</b></span>
+                    <span>Ban events: <b className={w.ban_events > 0 ? "text-red-400" : "text-zinc-300"}>{w.ban_events}</b></span>
+                  </div>
+                  <div className="text-xs text-zinc-500">
+                    <span className="text-zinc-400">Current phase:</span> {describePhase(w)}
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <Badge color="zinc">decision: {w.last_decision || "—"}</Badge>
+                    <Badge color="zinc">subscribed: {w.subscribed_channels?.length ?? 0}</Badge>
+                    {!w.is_running && <Badge color="yellow">worker idle</Badge>}
+                  </div>
+                  {w.last_error_message && (
+                    <div className="text-xs text-red-400 truncate">
+                      Last error: {w.last_error_message}
+                    </div>
                   )}
                 </div>
               ) : (
@@ -152,6 +236,64 @@ function TabDashboard({ warmings, accounts, profiles, onRefresh }) {
           </div>
         );
       })}
+
+      {selectedWarming && (
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-100">
+                Activity Feed: {selectedAccount?.name || `Account ${selectedWarming.account_id}`}
+              </h3>
+              <p className="text-xs text-zinc-500 mt-1">{describePhase(selectedWarming)}</p>
+            </div>
+            <div className="text-xs text-zinc-500 text-right">
+              <div>Last tick: <span className="text-zinc-300">{formatTs(selectedWarming.last_tick_at)}</span></div>
+              <div>Next action: <span className="text-zinc-300">{formatTs(selectedWarming.next_action_at)}</span></div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 text-xs">
+            <div className="rounded-lg bg-zinc-800/60 px-3 py-2 text-zinc-400">Online<div className="text-zinc-100 mt-1">{selectedWarming.online_sessions_today}</div></div>
+            <div className="rounded-lg bg-zinc-800/60 px-3 py-2 text-zinc-400">Subscribe<div className="text-zinc-100 mt-1">{selectedWarming.subscriptions_today}</div></div>
+            <div className="rounded-lg bg-zinc-800/60 px-3 py-2 text-zinc-400">React<div className="text-zinc-100 mt-1">{selectedWarming.reactions_today}</div></div>
+            <div className="rounded-lg bg-zinc-800/60 px-3 py-2 text-zinc-400">Search<div className="text-zinc-100 mt-1">{selectedWarming.searches_today}</div></div>
+            <div className="rounded-lg bg-zinc-800/60 px-3 py-2 text-zinc-400">Dialogs<div className="text-zinc-100 mt-1">{selectedWarming.dialog_reads_today}</div></div>
+            <div className="rounded-lg bg-zinc-800/60 px-3 py-2 text-zinc-400">Peer msgs<div className="text-zinc-100 mt-1">{selectedWarming.mutual_messages_today}</div></div>
+          </div>
+
+          <div className="space-y-2">
+            {actions.length ? actions.map((action) => (
+              <div key={action.id} className="flex items-start gap-3 rounded-lg border border-zinc-800 px-3 py-2">
+                <div className="pt-0.5"><ResultBadge result={action.result} /></div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-zinc-100">
+                    {actionLabel(action)}
+                    {action.target ? <span className="text-zinc-500"> · {action.target}</span> : null}
+                  </div>
+                  <div className="text-xs text-zinc-500 mt-1">
+                    attempt {formatTs(action.attempted_at)} · done {formatTs(action.completed_at || action.executed_at)}
+                  </div>
+                  {action.error_message && (
+                    <div className="text-xs text-red-400 mt-1">{action.error_message}</div>
+                  )}
+                  {action.details?.reason && (
+                    <div className="text-xs text-zinc-500 mt-1">reason: {action.details.reason}</div>
+                  )}
+                  {action.decision_context && (
+                    <div className="text-xs text-zinc-600 mt-1">
+                      ctx: {Object.entries(action.decision_context).map(([k, v]) => `${k}=${v}`).join(" · ")}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )) : (
+              <div className="text-sm text-zinc-500 py-6 text-center">
+                No attempts logged yet for this account.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {showStart && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
@@ -233,7 +375,7 @@ function TabProfiles({ profiles, onRefresh }) {
     phase_1_config: { ...DEFAULT_CONFIG },
     phase_2_config: { ...DEFAULT_CONFIG, subscriptions_per_day: 2, reactions_per_day: 3 },
     phase_3_config: { ...DEFAULT_CONFIG, subscriptions_per_day: 1, reactions_per_day: 6, mutual_messages_per_day: 5 },
-    maintenance_config: { online_sessions_per_day: 2, mutual_messages_per_day: 2, subscriptions_per_day: 0, reactions_per_day: 2, searches_per_day: 1, dialog_reads_per_day: 2 },
+    maintenance_config: { online_sessions_per_day: 2, mutual_messages_per_day: 0, subscriptions_per_day: 0, reactions_per_day: 2, searches_per_day: 1, dialog_reads_per_day: 2 },
     permanent_maintenance: false,
   };
   const [form, setForm] = useState(emptyForm);
@@ -321,7 +463,7 @@ function TabProfiles({ profiles, onRefresh }) {
               <label htmlFor="perm" className="text-sm text-zinc-300">Permanent maintenance after Phase 3</label>
             </div>
             <div className="grid grid-cols-2 gap-6">
-              <PhaseConfig label="Phase 1 (mutual msgs only)" value={form.phase_1_config}
+              <PhaseConfig label="Phase 1 (online + subscribe + reads)" value={form.phase_1_config}
                 onChange={v => setForm(f => ({ ...f, phase_1_config: v }))} />
               <PhaseConfig label="Phase 2 (+ subscriptions)" value={form.phase_2_config}
                 onChange={v => setForm(f => ({ ...f, phase_2_config: v }))} />
@@ -520,6 +662,8 @@ export default function Warming() {
   const [profiles, setProfiles] = useState([]);
   const [pool, setPool] = useState([]);
   const [abStats, setAbStats] = useState([]);
+  const [selectedAccountId, setSelectedAccountId] = useState(null);
+  const [selectedActions, setSelectedActions] = useState([]);
 
   const load = useCallback(async () => {
     const [w, a, p, ch, ab] = await Promise.all([
@@ -534,15 +678,40 @@ export default function Warming() {
     setProfiles(p);
     setPool(ch);
     setAbStats(ab);
+    setSelectedAccountId((current) => {
+      if (current && w.some((item) => item.account_id === current)) return current;
+      return w[0]?.account_id ?? null;
+    });
+  }, []);
+
+  const loadSelectedActions = useCallback(async (accountId) => {
+    if (!accountId) {
+      setSelectedActions([]);
+      return;
+    }
+    const result = await api.getWarmingActions(accountId, 25, 0).catch(() => ({ items: [] }));
+    setSelectedActions(result.items || []);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    loadSelectedActions(selectedAccountId);
+  }, [selectedAccountId, loadSelectedActions]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      load();
+      if (selectedAccountId) loadSelectedActions(selectedAccountId);
+    }, 25000);
+    return () => window.clearInterval(intervalId);
+  }, [load, loadSelectedActions, selectedAccountId]);
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
       <div className="mb-6">
         <h1 className="text-xl font-semibold text-zinc-100">Warming</h1>
-        <p className="text-sm text-zinc-500 mt-0.5">Account warm-up — human imitation engine</p>
+        <p className="text-sm text-zinc-500 mt-0.5">Account warm-up and background maintenance</p>
       </div>
 
       <div className="flex gap-1 mb-6 bg-zinc-900 rounded-xl p-1 w-fit border border-zinc-800">
@@ -556,7 +725,17 @@ export default function Warming() {
         ))}
       </div>
 
-      {tab === "Dashboard" && <TabDashboard warmings={warmings} accounts={accounts} profiles={profiles} onRefresh={load} />}
+      {tab === "Dashboard" && (
+        <TabDashboard
+          warmings={warmings}
+          accounts={accounts}
+          profiles={profiles}
+          actions={selectedActions}
+          selectedAccountId={selectedAccountId}
+          onSelectAccount={setSelectedAccountId}
+          onRefresh={load}
+        />
+      )}
       {tab === "Profiles" && <TabProfiles profiles={profiles} onRefresh={load} />}
       {tab === "A/B Campaigns" && <TabAB stats={abStats} />}
       {tab === "Channel Pool" && <TabPool pool={pool} onRefresh={load} />}

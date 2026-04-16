@@ -216,11 +216,23 @@ class AccountWarming(Base):
     started_at = Column(DateTime, default=datetime.utcnow)
     phase_started_at = Column(DateTime, default=datetime.utcnow)
     last_action_at = Column(DateTime, nullable=True)
+    last_success_at = Column(DateTime, nullable=True)
+    last_tick_at = Column(DateTime, nullable=True)
+    next_action_at = Column(DateTime, nullable=True)
+    last_decision = Column(String(100), nullable=True)
+    last_error_at = Column(DateTime, nullable=True)
+    last_error_message = Column(Text, nullable=True)
     health_score = Column(Integer, default=0)        # 0–100
     subscribed_channels = Column(Text, default="[]") # JSON list[str]
     peer_account_ids = Column(Text, default="[]")    # JSON list[int] — accounts to mutual-msg with
     actions_today = Column(Integer, default=0)
     actions_today_date = Column(Date, nullable=True) # date of last reset
+    online_sessions_today = Column(Integer, default=0)
+    subscriptions_today = Column(Integer, default=0)
+    reactions_today = Column(Integer, default=0)
+    searches_today = Column(Integer, default=0)
+    dialog_reads_today = Column(Integer, default=0)
+    mutual_messages_today = Column(Integer, default=0)
     total_actions = Column(Integer, default=0)
     ban_events = Column(Integer, default=0)          # flood/spam events counter
 
@@ -239,6 +251,10 @@ class WarmingAction(Base):
     result = Column(String(20), nullable=False)        # success|failed|flood_wait|skipped
     flood_wait_seconds = Column(Integer, nullable=True)
     details = Column(Text, nullable=True)              # JSON extra info
+    error_message = Column(Text, nullable=True)
+    decision_context = Column(Text, nullable=True)
+    attempted_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
     executed_at = Column(DateTime, default=datetime.utcnow)
 
     warming = relationship("AccountWarming", back_populates="actions")

@@ -10,6 +10,10 @@
 - Campaign pauses or blocks an account when Telegram cannot resolve a publicly existing username
 - Web UI works against same-origin API and configurable WebSocket URL
 - Settings API does not return secret values
+- Warming start produces a heartbeat within minutes and logs attempted/success/skipped action rows
+- Warming score stays near zero when no actions were executed
+- Phase 1 can subscribe to one channel per day when pool entries are available
+- Warming UI refreshes without manual reload and shows last decision / next action / last error
 
 ## Commands
 - `python3 -m compileall backend`

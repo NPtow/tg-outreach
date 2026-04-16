@@ -13,6 +13,7 @@
 - [x] Update frontend for account health, proxy management, worker status, and structured campaign failures.
 - [~] Validate build/runtime flows and document deploy assumptions for Railway `web` + `worker`.
 - [~] Add username-resolution restriction detection so campaigns block restricted accounts instead of falsely failing valid public usernames.
+- [~] Repair warming execution path so Phase 1 performs real actions, quotas are enforced, and progress/heartbeats are observable in API and UI.
 
 ## Validation Assumptions
 - Backend syntax: `python3 -m compileall backend`
