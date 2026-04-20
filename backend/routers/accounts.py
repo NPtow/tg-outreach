@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import Account
+from backend.models import Account, AccountWarming, WarmingAction, Conversation, Message, Campaign, CampaignTarget
 from backend.runtime_config import owns_telegram_runtime
 from backend.security import decrypt_value, encrypt_value, has_secret
 from backend.worker_client import forward_to_worker
@@ -89,7 +89,6 @@ def _serialize_account(account: Account) -> dict:
         "last_proxy_check_at": account.last_proxy_check_at,
         "last_connect_at": account.last_connect_at,
         "last_seen_online_at": account.last_seen_online_at,
-        "quarantine_until": account.quarantine_until,
         "warmup_level": account.warmup_level or 0,
         "session_source": account.session_source or "",
         "proxy_last_rtt_ms": account.proxy_last_rtt_ms,
@@ -391,6 +390,15 @@ async def delete_account(account_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Account not found")
     if owns_telegram_runtime():
         await tg.stop_client(account_id)
+    # Delete related records to avoid FK constraint failures
+    warming = db.query(AccountWarming).filter(AccountWarming.account_id == account_id).first()
+    if warming:
+        db.query(WarmingAction).filter(WarmingAction.account_warming_id == warming.id).delete()
+        db.delete(warming)
+    for conv in db.query(Conversation).filter(Conversation.account_id == account_id).all():
+        db.query(Message).filter(Message.conversation_id == conv.id).delete()
+        db.delete(conv)
+    db.query(CampaignTarget).filter(CampaignTarget.account_id == account_id).update({"account_id": None})
     db.delete(acc)
     db.commit()
     return {"ok": True}

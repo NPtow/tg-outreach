@@ -135,7 +135,6 @@ def _serialize_health(account: Account) -> dict:
         "last_proxy_check_at": account.last_proxy_check_at,
         "last_connect_at": account.last_connect_at,
         "last_seen_online_at": account.last_seen_online_at,
-        "quarantine_until": account.quarantine_until,
         "warmup_level": account.warmup_level or 0,
         "session_source": account.session_source or "",
         "proxy_last_rtt_ms": account.proxy_last_rtt_ms,
@@ -219,20 +218,6 @@ def _warmup_daily_cap(account: Account) -> int:
     level = max(0, min(account.warmup_level or 0, len(warmup_caps) - 1))
     return warmup_caps[level]
 
-
-def _quarantine_account(account_id: int, until: datetime, code: str, message: str) -> dict:
-    health = _persist_account_health(
-        account_id,
-        connection_state="quarantined",
-        eligibility_state="blocked_quarantine",
-        quarantine_until=until,
-        last_error_code=code,
-        last_error_message=message,
-        last_error_at=_utcnow(),
-    )
-    if _ws_broadcast:
-        asyncio.create_task(_ws_broadcast({"event": "account_health", "account_id": account_id, "health": health}))
-    return health
 
 
 async def _proxy_connectivity_check(account: Account) -> dict:
