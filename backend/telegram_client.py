@@ -710,6 +710,31 @@ def get_account_health(account_id: int) -> dict:
         db.close()
 
 
+async def clear_quarantine(account_id: int) -> dict:
+    """Manually clear quarantine and reconnect the account."""
+    health = _persist_account_health(
+        account_id,
+        quarantine_until=None,
+        connection_state="offline",
+        last_error_code=None,
+        last_error_message=None,
+    )
+    if _ws_broadcast:
+        asyncio.create_task(_ws_broadcast({"event": "account_health", "account_id": account_id, "health": health}))
+    db = SessionLocal()
+    try:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        if acc:
+            acc.is_active = True
+            db.commit()
+            ok = await start_client(acc)
+            health = get_account_health(account_id)
+            return {"ok": ok, "health": health}
+    finally:
+        db.close()
+    return {"ok": False, "error": "Account not found"}
+
+
 async def reconnect_account_runtime(account_id: int, requested_by: str = "system") -> dict:
     db = SessionLocal()
     try:
@@ -1292,7 +1317,7 @@ async def _campaign_worker(campaign_id: int):
                     db.commit()
                     continue
                 except PeerFloodError:
-                    wait_until = _utcnow() + timedelta(hours=24)
+                    wait_until = _utcnow() + timedelta(hours=4)
                     _quarantine_account(
                         _account_id,
                         until=wait_until,

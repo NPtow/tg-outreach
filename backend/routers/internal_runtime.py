@@ -46,6 +46,11 @@ async def reconnect(account_id: int):
     return result
 
 
+@router.post("/accounts/{account_id}/clear-quarantine", dependencies=[Depends(require_worker_token)])
+async def clear_quarantine(account_id: int):
+    return await tg.clear_quarantine(account_id)
+
+
 @router.post("/accounts/{account_id}/save-session", dependencies=[Depends(require_worker_token)])
 async def save_session(account_id: int):
     ok = await tg.save_session_now(account_id)

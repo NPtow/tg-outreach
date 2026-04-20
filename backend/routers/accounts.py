@@ -264,6 +264,18 @@ async def reconnect_account(account_id: int, db: Session = Depends(get_db)):
     return result
 
 
+@router.post("/{account_id}/clear-quarantine")
+async def clear_quarantine(account_id: int, db: Session = Depends(get_db)):
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    if owns_telegram_runtime():
+        result = await tg.clear_quarantine(account_id)
+    else:
+        result = await _forward_or_fail("POST", f"/internal/runtime/accounts/{account_id}/clear-quarantine")
+    return result
+
+
 @router.post("/{account_id}/toggle-reply")
 def toggle_reply(account_id: int, db: Session = Depends(get_db)):
     acc = db.query(Account).filter(Account.id == account_id).first()
