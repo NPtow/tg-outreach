@@ -1333,7 +1333,9 @@ async def _campaign_worker(campaign_id: int):
                     if isinstance(e, (UsernameNotOccupiedError, UsernameInvalidError)):
                         public_exists = await _public_username_exists(target.username)
 
-                    if public_exists:
+                    # public_exists=True → confirmed resolution issue; public_exists=None → check failed,
+                    # treat conservatively (don't permanently fail — try another account or pause)
+                    if public_exists or (public_exists is None and isinstance(e, (UsernameNotOccupiedError, UsernameInvalidError))):
                         target.error = (
                             f"Public username @{target.username} exists, but account {_account_id} "
                             "cannot resolve it via Telegram API"
