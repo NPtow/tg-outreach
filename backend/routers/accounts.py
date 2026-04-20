@@ -398,17 +398,19 @@ async def delete_account(account_id: int, db: Session = Depends(get_db)):
     for conv in db.query(Conversation).filter(Conversation.account_id == account_id).all():
         db.query(Message).filter(Message.conversation_id == conv.id).delete()
         db.delete(conv)
+    import json as _json
     db.query(CampaignTarget).filter(CampaignTarget.account_id == account_id).update({"account_id": None})
-    # Update campaigns that reference this account as primary
-    for camp in db.query(Campaign).filter(Campaign.account_id == account_id).all():
-        import json as _json
-        ids = [i for i in (_json.loads(camp.account_ids) if camp.account_ids else []) if i != account_id]
-        if ids:
+    for camp in db.query(Campaign).all():
+        ids = [i for i in (_json.loads(camp.account_ids) if camp.account_ids else [camp.account_id]) if i != account_id]
+        if not ids:
+            # No accounts left — delete campaign and its targets
+            db.query(CampaignTarget).filter(CampaignTarget.campaign_id == camp.id).delete()
+            db.delete(camp)
+        elif camp.account_id == account_id:
             camp.account_id = ids[0]
             camp.account_ids = _json.dumps(ids)
         else:
-            camp.account_id = None
-            camp.account_ids = "[]"
+            camp.account_ids = _json.dumps(ids)
     db.delete(acc)
     db.commit()
     return {"ok": True}
