@@ -275,6 +275,30 @@ async def clear_quarantine(account_id: int, db: Session = Depends(get_db)):
     return result
 
 
+@router.post("/{account_id}/unblock")
+async def unblock_account(account_id: int, db: Session = Depends(get_db)):
+    """Reset account connection/eligibility state in DB without touching Telegram runtime."""
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    acc.quarantine_until = None
+    acc.is_active = True
+    acc.connection_state = "offline"
+    acc.eligibility_state = "ok"
+    acc.last_error_code = None
+    acc.last_error_message = None
+    acc.last_error_at = None
+    db.commit()
+    try:
+        if owns_telegram_runtime():
+            ok = await tg.start_client(acc)
+            return {"ok": bool(ok), "started": True}
+    except Exception as e:
+        logger.exception("unblock: start_client failed for %s", account_id)
+        return {"ok": True, "started": False, "error": str(e)}
+    return {"ok": True, "started": False}
+
+
 @router.post("/{account_id}/toggle-reply")
 def toggle_reply(account_id: int, db: Session = Depends(get_db)):
     acc = db.query(Account).filter(Account.id == account_id).first()
