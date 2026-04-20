@@ -107,9 +107,6 @@ def _derive_session_state(account: Account) -> str:
 
 
 def _compute_eligibility(account: Account) -> str:
-    now = _utcnow()
-    if account.quarantine_until and account.quarantine_until > now:
-        return "blocked_quarantine"
     if (account.proxy_state or "unknown") in {"failed", "timeout", "auth_failed"}:
         return "blocked_proxy"
     if getattr(account, "needs_reauth", False) or (account.session_state or "missing") in {
@@ -741,19 +738,9 @@ async def reconnect_account_runtime(account_id: int, requested_by: str = "system
         acc = db.query(Account).filter(Account.id == account_id).first()
         if not acc:
             return {"ok": False, "error": "Account not found", "requested_by": requested_by}
-        quarantine_until = getattr(acc, "quarantine_until", None)
-        if quarantine_until and quarantine_until > _utcnow():
-            health = _persist_account_health(account_id, connection_state="quarantined")
-            result = {
-                "ok": False,
-                "requested_by": requested_by,
-                "error": "Account is quarantined",
-                "reason": "blocked_quarantine",
-                "health": health,
-            }
-            if _ws_broadcast:
-                await _ws_broadcast({"event": "account_health", "account_id": account_id, "health": health})
-            return result
+        if acc.quarantine_until:
+            acc.quarantine_until = None
+            db.commit()
         _persist_account_health(
             account_id,
             connection_state="connecting",
@@ -885,12 +872,7 @@ async def _run_client(client: TelegramClient, account_id: int):
             acc = db.query(Account).filter(Account.id == account_id).first()
             if acc:
                 acc.is_active = False
-                if acc.quarantine_until and acc.quarantine_until > _utcnow():
-                    acc.connection_state = "quarantined"
-                elif acc.needs_reauth:
-                    acc.connection_state = "reauth_required"
-                else:
-                    acc.connection_state = "offline"
+                acc.connection_state = "reauth_required" if acc.needs_reauth else "offline"
                 db.commit()
         finally:
             db.close()
@@ -920,11 +902,8 @@ async def _supervise_accounts():
         try:
             accounts = db.query(Account).all()
             for acc in accounts:
-                if acc.quarantine_until and acc.quarantine_until <= _utcnow():
+                if acc.quarantine_until:
                     acc.quarantine_until = None
-                    acc.connection_state = "offline"
-                    acc.proxy_state = "unknown" if acc.proxy_host else "ok"
-                    acc.eligibility_state = _compute_eligibility(acc)
                     db.commit()
 
                 if not acc.last_proxy_check_at or (_utcnow() - acc.last_proxy_check_at).total_seconds() > 300:
@@ -932,8 +911,7 @@ async def _supervise_accounts():
 
                 needs_reauth = getattr(acc, "needs_reauth", False)
                 has_session = decrypt_value(acc.session_string) or os.path.exists(_session_path(acc.id) + ".session")
-                quarantined = acc.quarantine_until and acc.quarantine_until > _utcnow()
-                if has_session and not needs_reauth and not quarantined and acc.id not in _clients:
+                if has_session and not needs_reauth and acc.id not in _clients:
                     logger.info(f"Supervisor: reconnecting account {acc.id} ({acc.phone})")
                     ok = await start_client(acc)
                     if ok:
@@ -1305,28 +1283,18 @@ async def _campaign_worker(campaign_id: int):
                     _clear_error(_account_id, connection_state="online", last_seen_online_at=_utcnow())
                     logger.info(f"Campaign {campaign_id}: sent to {target.username}")
                 except FloodWaitError as e:
-                    wait_until = _utcnow() + timedelta(seconds=e.seconds + 60)
-                    _quarantine_account(
-                        _account_id,
-                        until=wait_until,
-                        code="FLOOD_WAIT",
-                        message=f"FloodWait {e.seconds}s",
-                    )
-                    await stop_client(_account_id)
-                    logger.warning(f"Campaign {campaign_id}: FloodWait {e.seconds}s on account {_account_id}")
+                    wait_secs = e.seconds + 30
+                    _mark_error(_account_id, "FLOOD_WAIT", f"FloodWait {e.seconds}s")
+                    logger.warning(f"Campaign {campaign_id}: FloodWait {e.seconds}s on account {_account_id}, sleeping {wait_secs}s")
                     db.commit()
+                    await asyncio.sleep(wait_secs)
                     continue
                 except PeerFloodError:
-                    wait_until = _utcnow() + timedelta(hours=4)
-                    _quarantine_account(
-                        _account_id,
-                        until=wait_until,
-                        code="PEER_FLOOD",
-                        message="PeerFloodError — account quarantined",
-                    )
-                    await stop_client(_account_id)
-                    logger.error(f"Campaign {campaign_id}: PeerFloodError on account {_account_id}")
+                    wait_secs = 3600
+                    _mark_error(_account_id, "PEER_FLOOD", "PeerFloodError — sleeping 1h")
+                    logger.error(f"Campaign {campaign_id}: PeerFloodError on account {_account_id}, sleeping 1h")
                     db.commit()
+                    await asyncio.sleep(wait_secs)
                     continue
                 except (UserPrivacyRestrictedError, UsernameNotOccupiedError, UsernameInvalidError) as e:
                     public_exists = None
