@@ -199,6 +199,9 @@ def get_targets(campaign_id: int, status: Optional[str] = None, db: Session = De
             "role": t.role,
             "custom_note": t.custom_note,
             "status": t.status,
+            "error": t.error,
+            "sent_at": t.sent_at,
+            "account_id": t.account_id,
         }
         for t in targets
     ]
