@@ -1151,14 +1151,17 @@ async def start_all_accounts():
     try:
         accounts = db.query(Account).all()
         for acc in accounts:
-            if _clear_legacy_account_limit_state(acc):
-                db.commit()
-            has_session = acc.session_string or os.path.exists(_session_path(acc.id) + ".session")
-            if has_session:
-                ok = await start_client(acc)
-                if ok:
-                    acc.is_active = True
+            try:
+                if _clear_legacy_account_limit_state(acc):
                     db.commit()
+                has_session = acc.session_string or os.path.exists(_session_path(acc.id) + ".session")
+                if has_session:
+                    ok = await start_client(acc)
+                    if ok:
+                        acc.is_active = True
+                        db.commit()
+            except Exception as e:
+                logger.error(f"Account {acc.id} ({acc.phone}): startup error skipped — {e}")
         await resume_running_campaigns(db)
     finally:
         db.close()
