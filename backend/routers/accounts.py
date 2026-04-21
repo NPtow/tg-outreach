@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import Account, AccountWarming, WarmingAction, Conversation, Message, Campaign, CampaignTarget
+from backend.models import Account, Conversation, Message, Campaign, CampaignTarget
 from backend.runtime_config import owns_telegram_runtime
 from backend.security import decrypt_value, encrypt_value, has_secret
 from backend.worker_client import forward_to_worker
@@ -68,12 +68,20 @@ class SetSessionRequest(BaseModel):
 
 
 def _serialize_account(account: Account) -> dict:
+    state = tg.build_account_status(account)
     return {
         "id": account.id,
         "name": account.name,
         "phone": account.phone,
         "app_id": account.app_id,
-        "is_active": account.connection_state == "online",
+        "is_active": state["is_online"],
+        "status": state["status"],
+        "reason": state["reason"],
+        "is_online": state["is_online"],
+        "can_receive": state["can_receive"],
+        "can_auto_reply": state["can_auto_reply"],
+        "can_start_outreach": state["can_start_outreach"],
+        "updated_at": state["updated_at"],
         "auto_reply": account.auto_reply,
         "tdata_stored": has_secret(account.tdata_blob),
         "prompt_template_id": account.prompt_template_id,
@@ -82,7 +90,6 @@ def _serialize_account(account: Account) -> dict:
         "proxy_port": account.proxy_port,
         "proxy_type": account.proxy_type or "SOCKS5",
         "proxy_user": account.proxy_user or "",
-        "health": tg.build_public_account_health(account),
     }
 
 
@@ -103,14 +110,6 @@ async def _forward_or_fail(method: str, path: str, json_body: Optional[dict] = N
 def list_accounts(db: Session = Depends(get_db)):
     accounts = db.query(Account).all()
     return [_serialize_account(a) for a in accounts]
-
-
-@router.get("/{account_id}/health")
-def get_account_health(account_id: int, db: Session = Depends(get_db)):
-    acc = db.query(Account).filter(Account.id == account_id).first()
-    if not acc:
-        raise HTTPException(404, "Account not found")
-    return _serialize_account(acc)
 
 
 def _generate_device_params(account_id: int) -> dict:
@@ -402,10 +401,6 @@ async def delete_account(account_id: int, db: Session = Depends(get_db)):
     if owns_telegram_runtime():
         await tg.stop_client(account_id)
     # Delete related records to avoid FK constraint failures
-    warming = db.query(AccountWarming).filter(AccountWarming.account_id == account_id).first()
-    if warming:
-        db.query(WarmingAction).filter(WarmingAction.account_warming_id == warming.id).delete()
-        db.delete(warming)
     for conv in db.query(Conversation).filter(Conversation.account_id == account_id).all():
         db.query(Message).filter(Message.conversation_id == conv.id).delete()
         db.delete(conv)

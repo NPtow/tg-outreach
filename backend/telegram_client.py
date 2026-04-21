@@ -106,11 +106,14 @@ def _derive_session_state(account: Account) -> str:
     return "missing"
 
 
-def _normalized_connection_state(account: Account) -> str:
-    connection_state = account.connection_state or "offline"
-    if connection_state == "quarantined":
-        return "offline"
-    return connection_state
+def _runtime_connection_state(account: Account) -> str:
+    """Use the live Telethon runtime as source of truth; DB state is only a log."""
+    if account.id in _clients:
+        return "online"
+    stored_state = account.connection_state or "offline"
+    if stored_state in {"connecting", "degraded", "reauth_required"}:
+        return stored_state
+    return "offline"
 
 
 def _compute_eligibility(account: Account) -> str:
@@ -122,9 +125,9 @@ def _compute_eligibility(account: Account) -> str:
         "recovery_failed",
     }:
         return "blocked_auth"
-    if _normalized_connection_state(account) == "online":
+    if account.id in _clients:
         return "eligible"
-    return "blocked_auth"
+    return "blocked_runtime"
 
 
 def _account_updated_at(account: Account) -> Optional[datetime]:
@@ -163,8 +166,8 @@ def _public_error_fields(account: Account) -> tuple[Optional[str], Optional[str]
     return account.last_error_code, account.last_error_message, account.last_error_at
 
 
-def build_public_account_health(account: Account) -> dict:
-    connection_state = _normalized_connection_state(account)
+def build_account_status(account: Account) -> dict:
+    connection_state = _runtime_connection_state(account)
     proxy_state = account.proxy_state or "unknown"
     session_state = account.session_state or _derive_session_state(account)
     public_error_code, public_error_message, public_error_at = _public_error_fields(account)
@@ -208,30 +211,14 @@ def build_public_account_health(account: Account) -> dict:
         "can_receive": can_receive,
         "can_auto_reply": can_auto_reply,
         "can_start_outreach": can_start_outreach,
-        "debug": {
-            "connection_state": connection_state,
-            "proxy_state": proxy_state,
-            "session_state": session_state,
-            "eligibility_state": _compute_eligibility(account),
-            "last_error_code": public_error_code,
-            "last_error_message": public_error_message,
-            "last_error_at": public_error_at,
-            "last_proxy_check_at": account.last_proxy_check_at,
-            "last_connect_at": account.last_connect_at,
-            "last_seen_online_at": account.last_seen_online_at,
-            "proxy_last_rtt_ms": account.proxy_last_rtt_ms,
-            "warmup_level": account.warmup_level or 0,
-            "session_source": account.session_source or "",
-            "needs_reauth": needs_reauth,
-        },
     }
 
 
-def _serialize_health(account: Account) -> dict:
+def _serialize_runtime_state(account: Account) -> dict:
     last_error_code, last_error_message, last_error_at = _public_error_fields(account)
     return {
         "account_id": account.id,
-        "connection_state": _normalized_connection_state(account),
+        "connection_state": _runtime_connection_state(account),
         "proxy_state": account.proxy_state or "unknown",
         "session_state": account.session_state or "missing",
         "eligibility_state": _compute_eligibility(account),
@@ -241,13 +228,12 @@ def _serialize_health(account: Account) -> dict:
         "last_proxy_check_at": account.last_proxy_check_at,
         "last_connect_at": account.last_connect_at,
         "last_seen_online_at": account.last_seen_online_at,
-        "warmup_level": account.warmup_level or 0,
         "session_source": account.session_source or "",
         "proxy_last_rtt_ms": account.proxy_last_rtt_ms,
     }
 
 
-def _persist_account_health(account_id: int, **updates) -> dict:
+def _persist_account_runtime_state(account_id: int, **updates) -> dict:
     db = SessionLocal()
     try:
         acc = db.query(Account).filter(Account.id == account_id).first()
@@ -260,13 +246,13 @@ def _persist_account_health(account_id: int, **updates) -> dict:
         acc.eligibility_state = _compute_eligibility(acc)
         db.commit()
         db.refresh(acc)
-        return _serialize_health(acc)
+        return _serialize_runtime_state(acc)
     finally:
         db.close()
 
 
 def _mark_error(account_id: int, code: str, message: str, **extra) -> dict:
-    return _persist_account_health(
+    return _persist_account_runtime_state(
         account_id,
         last_error_code=code,
         last_error_message=message,
@@ -276,7 +262,7 @@ def _mark_error(account_id: int, code: str, message: str, **extra) -> dict:
 
 
 def _clear_error(account_id: int, **extra) -> dict:
-    return _persist_account_health(
+    return _persist_account_runtime_state(
         account_id,
         last_error_code=None,
         last_error_message=None,
@@ -307,13 +293,6 @@ async def _public_username_exists(username: Optional[str]) -> Optional[bool]:
         return None
 
 
-def _warmup_daily_cap(account: Account) -> int:
-    warmup_caps = [10, 20, 35, 50]
-    level = max(0, min(account.warmup_level or 0, len(warmup_caps) - 1))
-    return warmup_caps[level]
-
-
-
 async def _proxy_connectivity_check(account: Account) -> dict:
     started = time.perf_counter()
     target_host = "149.154.167.50"
@@ -342,31 +321,31 @@ async def _proxy_connectivity_check(account: Account) -> dict:
             writer.close()
             await writer.wait_closed()
         rtt_ms = int((time.perf_counter() - started) * 1000)
-        health = _clear_error(
+        state = _clear_error(
             account.id,
             proxy_state="ok",
             last_proxy_check_at=_utcnow(),
             proxy_last_rtt_ms=rtt_ms,
         )
-        return {"ok": True, "proxy_state": "ok", "rtt_ms": rtt_ms, "health": health}
+        return {"ok": True, "proxy_state": "ok", "rtt_ms": rtt_ms, "state": state}
     except asyncio.TimeoutError:
-        health = _mark_error(
+        state = _mark_error(
             account.id,
             "PROXY_TIMEOUT",
             "Proxy connection timed out",
             proxy_state="timeout",
             last_proxy_check_at=_utcnow(),
         )
-        return {"ok": False, "proxy_state": "timeout", "error": "Proxy connection timed out", "health": health}
+        return {"ok": False, "proxy_state": "timeout", "error": "Proxy connection timed out", "state": state}
     except Exception as exc:
-        health = _mark_error(
+        state = _mark_error(
             account.id,
             "PROXY_FAILED",
             str(exc),
             proxy_state="failed",
             last_proxy_check_at=_utcnow(),
         )
-        return {"ok": False, "proxy_state": "failed", "error": str(exc), "health": health}
+        return {"ok": False, "proxy_state": "failed", "error": str(exc), "state": state}
 
 
 async def _save_session_string(account_id: int, client: TelegramClient):
@@ -402,7 +381,7 @@ async def proxy_test_account(account_id: int) -> dict:
         db.close()
     result = await _proxy_connectivity_check(acc)
     if _ws_broadcast:
-        await _ws_broadcast({"event": "account_health", "account_id": account_id, "health": result.get("health", {})})
+        await _ws_broadcast({"event": "account_status", "account_id": account_id, "state": result.get("state", {})})
     return result
 
 
@@ -811,11 +790,11 @@ async def _set_needs_reauth(account_id: int, value: bool):
         db.close()
 
 
-def get_account_health(account_id: int) -> dict:
+def get_account_state(account_id: int) -> dict:
     db = SessionLocal()
     try:
         acc = db.query(Account).filter(Account.id == account_id).first()
-        return _serialize_health(acc) if acc else {}
+        return _serialize_runtime_state(acc) if acc else {}
     finally:
         db.close()
 
@@ -846,7 +825,7 @@ async def reconnect_account_runtime(account_id: int, requested_by: str = "system
             return {"ok": False, "error": "Account not found", "requested_by": requested_by}
         if _clear_legacy_account_limit_state(acc):
             db.commit()
-        _persist_account_health(
+        _persist_account_runtime_state(
             account_id,
             connection_state="connecting",
             session_state=_derive_session_state(acc),
@@ -861,29 +840,29 @@ async def reconnect_account_runtime(account_id: int, requested_by: str = "system
             "requested_by": requested_by,
             "reason": "blocked_proxy",
             "steps": {"proxy": proxy_result},
-            "health": get_account_health(account_id),
+            "state": get_account_state(account_id),
         }
 
     db = SessionLocal()
     try:
         acc = db.query(Account).filter(Account.id == account_id).first()
         ok = await start_client(acc)
-        health = get_account_health(account_id)
+        state = get_account_state(account_id)
         result = {
             "ok": ok,
             "requested_by": requested_by,
             "steps": {
                 "proxy": proxy_result,
-                "session": {"state": health.get("session_state")},
-                "telegram": {"ok": ok, "state": health.get("connection_state")},
+                "session": {"state": state.get("session_state")},
+                "telegram": {"ok": ok, "state": state.get("connection_state")},
             },
-            "health": health,
+            "state": state,
         }
         if not ok:
-            result["reason"] = health.get("eligibility_state")
-            result["error"] = health.get("last_error_message") or "Failed to connect"
+            result["reason"] = state.get("eligibility_state")
+            result["error"] = state.get("last_error_message") or "Failed to connect"
         if _ws_broadcast:
-            await _ws_broadcast({"event": "account_health", "account_id": account_id, "health": health})
+            await _ws_broadcast({"event": "account_status", "account_id": account_id, "state": state})
         return result
     finally:
         db.close()
@@ -902,7 +881,7 @@ async def start_client(account: Account, _tdata_retried: bool = False) -> bool:
         )
         return True
 
-    _persist_account_health(account.id, connection_state="connecting", session_state=_derive_session_state(account))
+    _persist_account_runtime_state(account.id, connection_state="connecting", session_state=_derive_session_state(account))
     client = _make_client(account)
     try:
         await client.connect()
@@ -911,16 +890,16 @@ async def start_client(account: Account, _tdata_retried: bool = False) -> bool:
             await client.disconnect()
             _mark_error(account.id, "SESSION_EXPIRED", "Session expired", session_state="expired")
             if not _tdata_retried and getattr(account, "tdata_blob", None):
-                _persist_account_health(account.id, session_state="recovering")
+                _persist_account_runtime_state(account.id, session_state="recovering")
                 recovered = await _try_recover_from_tdata(account.id)
                 if recovered:
                     account.session_string = encrypt_value(recovered)
                     return await start_client(account, _tdata_retried=True)
-                _persist_account_health(account.id, session_state="recovery_failed")
+                _persist_account_runtime_state(account.id, session_state="recovery_failed")
             await _set_needs_reauth(account.id, True)
             return False
 
-        _persist_account_health(
+        _persist_account_runtime_state(
             account.id,
             connection_state="online",
             proxy_state="ok",
@@ -949,12 +928,12 @@ async def start_client(account: Account, _tdata_retried: bool = False) -> bool:
         await client.disconnect()
         _mark_error(account.id, type(e).__name__, str(e), session_state="expired")
         if not _tdata_retried and getattr(account, "tdata_blob", None):
-            _persist_account_health(account.id, session_state="recovering")
+            _persist_account_runtime_state(account.id, session_state="recovering")
             recovered = await _try_recover_from_tdata(account.id)
             if recovered:
                 account.session_string = encrypt_value(recovered)
                 return await start_client(account, _tdata_retried=True)
-            _persist_account_health(account.id, session_state="recovery_failed")
+            _persist_account_runtime_state(account.id, session_state="recovery_failed")
         await _set_needs_reauth(account.id, True)
         return False
     except Exception as e:
@@ -1251,10 +1230,10 @@ async def preflight_and_start_campaign(campaign_id: int) -> dict:
                 continue
             if aid not in _clients:
                 await reconnect_account_runtime(aid, requested_by=f"campaign:{campaign_id}")
-            snapshot = get_account_health(aid)
+            snapshot = get_account_state(aid)
             if snapshot.get("eligibility_state") == "eligible" and aid in _clients:
                 eligible_accounts.append(
-                    {"account_id": aid, "name": acc.name, "health": snapshot}
+                    {"account_id": aid, "name": acc.name, "state": snapshot}
                 )
             else:
                 blocked_accounts.append(
@@ -1263,7 +1242,7 @@ async def preflight_and_start_campaign(campaign_id: int) -> dict:
                         "name": acc.name,
                         "reason": snapshot.get("eligibility_state") or "blocked_auth",
                         "error": snapshot.get("last_error_message"),
-                        "health": snapshot,
+                        "state": snapshot,
                     }
                 )
         if not eligible_accounts:
@@ -1421,7 +1400,7 @@ async def _campaign_worker(campaign_id: int):
                         CampaignTarget.status == "sent",
                         CampaignTarget.sent_at >= today_start,
                     ).count()
-                    account_cap = min(campaign.daily_limit, _warmup_daily_cap(acc))
+                    account_cap = campaign.daily_limit
                     if sent_by_account_today >= account_cap:
                         continue
                     available.append((aid, _clients[aid], acc))
@@ -1483,7 +1462,7 @@ async def _campaign_worker(campaign_id: int):
                         public_exists = await _public_username_exists(target.username)
 
                     # public_exists=True → confirmed target resolution issue; public_exists=None → check failed.
-                    # Either way this is a target failure, not an account-health restriction.
+                    # Either way this is a target failure, not an account restriction.
                     if public_exists or (public_exists is None and isinstance(e, (UsernameNotOccupiedError, UsernameInvalidError))):
                         _clear_error(_account_id, connection_state="online", last_seen_online_at=_utcnow())
                         target.status = "failed"

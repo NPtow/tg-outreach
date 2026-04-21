@@ -36,7 +36,6 @@ export const api = {
 
   // Accounts
   getAccounts: () => req("GET", "/api/accounts/"),
-  getAccountHealth: (id) => req("GET", `/api/accounts/${id}/health`),
   createAccount: (data) => req("POST", "/api/accounts/", data),
   updateAccount: (id, data) => req("PATCH", `/api/accounts/${id}`, data),
   sendCode: (account_id) => req("POST", "/api/accounts/send-code", { account_id }),
@@ -110,26 +109,4 @@ export const api = {
   getSettings: () => req("GET", "/api/settings/"),
   saveSettings: (data) => req("PUT", "/api/settings/", data),
 
-  // Warming
-  getWarmingProfiles: () => req("GET", "/api/warming/profiles"),
-  createWarmingProfile: (data) => req("POST", "/api/warming/profiles", data),
-  updateWarmingProfile: (id, data) => req("PUT", `/api/warming/profiles/${id}`, data),
-  deleteWarmingProfile: (id) => req("DELETE", `/api/warming/profiles/${id}`),
-
-  getWarmings: () => req("GET", "/api/warming/accounts"),
-  startWarming: (accountId, data) => req("POST", `/api/warming/accounts/${accountId}/start`, data),
-  pauseWarming: (accountId) => req("POST", `/api/warming/accounts/${accountId}/pause`),
-  resumeWarming: (accountId) => req("POST", `/api/warming/accounts/${accountId}/resume`),
-  stopWarming: (accountId) => req("POST", `/api/warming/accounts/${accountId}/stop`),
-  getWarmingStatus: (accountId) => req("GET", `/api/warming/accounts/${accountId}/status`),
-  getWarmingActions: (accountId, limit = 50, offset = 0) =>
-    req("GET", `/api/warming/accounts/${accountId}/actions?limit=${limit}&offset=${offset}`),
-
-  getWarmingPool: () => req("GET", "/api/warming/pool"),
-  addWarmingChannel: (data) => req("POST", "/api/warming/pool", data),
-  importWarmingChannels: (channels) => req("POST", "/api/warming/pool/import", { channels }),
-  toggleWarmingChannel: (id) => req("PATCH", `/api/warming/pool/${id}`),
-  deleteWarmingChannel: (id) => req("DELETE", `/api/warming/pool/${id}`),
-
-  getWarmingAbStats: () => req("GET", "/api/warming/ab-stats"),
 };

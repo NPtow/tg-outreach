@@ -1,4 +1,3 @@
-import json
 import os
 
 from sqlalchemy import create_engine, text
@@ -26,7 +25,7 @@ def get_db():
 
 
 def init_db():
-    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact, Contact, ContactBatch, RuntimeEvent, WarmingProfile, AccountWarming, WarmingAction, WarmingChannelPool  # noqa
+    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact, Contact, ContactBatch, RuntimeEvent  # noqa
     Base.metadata.create_all(bind=engine)
 
     # Add new columns to existing tables (safe to re-run — errors for existing columns are swallowed)
@@ -52,7 +51,6 @@ def init_db():
         ("accounts", "last_proxy_check_at TIMESTAMP"),
         ("accounts", "last_connect_at TIMESTAMP"),
         ("accounts", "last_seen_online_at TIMESTAMP"),
-        ("accounts", "warmup_level INTEGER DEFAULT 0"),
         ("accounts", "session_source TEXT"),
         ("accounts", "proxy_last_rtt_ms INTEGER"),
         # campaigns
@@ -87,36 +85,6 @@ def init_db():
         ("accounts", "system_version TEXT"),
         ("accounts", "app_version TEXT"),
         ("accounts", "lang_code TEXT"),
-        # warming gate on campaigns
-        ("campaigns", "min_health_score INTEGER DEFAULT 0"),
-        # account warmings observability
-        ("account_warmings", "last_success_at TIMESTAMP"),
-        ("account_warmings", "last_tick_at TIMESTAMP"),
-        ("account_warmings", "next_action_at TIMESTAMP"),
-        ("account_warmings", "last_decision TEXT"),
-        ("account_warmings", "last_error_at TIMESTAMP"),
-        ("account_warmings", "last_error_message TEXT"),
-        ("account_warmings", "blocked_actions TEXT DEFAULT '{}'"),
-        ("account_warmings", "online_sessions_today INTEGER DEFAULT 0"),
-        ("account_warmings", "subscriptions_today INTEGER DEFAULT 0"),
-        ("account_warmings", "reactions_today INTEGER DEFAULT 0"),
-        ("account_warmings", "searches_today INTEGER DEFAULT 0"),
-        ("account_warmings", "dialog_reads_today INTEGER DEFAULT 0"),
-        ("account_warmings", "mutual_messages_today INTEGER DEFAULT 0"),
-        # warming channel pool verification
-        ("warming_channel_pool", "entity_type TEXT"),
-        ("warming_channel_pool", "peer_id TEXT"),
-        ("warming_channel_pool", "access_hash TEXT"),
-        ("warming_channel_pool", "invite_link TEXT"),
-        ("warming_channel_pool", "verification_status TEXT DEFAULT 'unknown'"),
-        ("warming_channel_pool", "last_verified_at TIMESTAMP"),
-        ("warming_channel_pool", "last_resolve_error TEXT"),
-        ("warming_channel_pool", "resolve_fail_count INTEGER DEFAULT 0"),
-        # warming actions observability
-        ("warming_actions", "error_message TEXT"),
-        ("warming_actions", "decision_context TEXT"),
-        ("warming_actions", "attempted_at TIMESTAMP"),
-        ("warming_actions", "completed_at TIMESTAMP"),
     ]
     with engine.connect() as conn:
         for table, col_def in new_cols:
@@ -183,75 +151,3 @@ def init_db():
                     conn.commit()
                 except Exception:
                     conn.rollback()
-
-    _ensure_standard_warming_profile()
-
-
-def _ensure_standard_warming_profile():
-    from backend.models import WarmingProfile
-
-    defaults = {
-        "phase_1_days": 3,
-        "phase_2_days": 7,
-        "phase_1_config": {
-            "online_sessions_per_day": 4,
-            "mutual_messages_per_day": 8,
-            "subscriptions_per_day": 1,
-            "reactions_per_day": 0,
-            "searches_per_day": 3,
-            "dialog_reads_per_day": 5,
-        },
-        "phase_2_config": {
-            "online_sessions_per_day": 5,
-            "mutual_messages_per_day": 6,
-            "subscriptions_per_day": 2,
-            "reactions_per_day": 3,
-            "searches_per_day": 4,
-            "dialog_reads_per_day": 5,
-        },
-        "phase_3_config": {
-            "online_sessions_per_day": 6,
-            "mutual_messages_per_day": 5,
-            "subscriptions_per_day": 1,
-            "reactions_per_day": 6,
-            "searches_per_day": 4,
-            "dialog_reads_per_day": 6,
-        },
-        "maintenance_config": {
-            "online_sessions_per_day": 2,
-            "mutual_messages_per_day": 0,
-            "subscriptions_per_day": 0,
-            "reactions_per_day": 2,
-            "searches_per_day": 1,
-            "dialog_reads_per_day": 2,
-        },
-    }
-
-    db = SessionLocal()
-    try:
-        profile = db.query(WarmingProfile).filter(WarmingProfile.name == "Standard").first()
-        if not profile:
-            return
-
-        changed = False
-        for field, expected in defaults.items():
-            if field.endswith("_config"):
-                current = json.loads(getattr(profile, field) or "{}")
-                merged = {**expected, **current}
-                if field == "phase_1_config" and current.get("subscriptions_per_day", 0) < 1:
-                    merged["subscriptions_per_day"] = 1
-                if field == "maintenance_config" and current.get("mutual_messages_per_day") is None:
-                    merged["mutual_messages_per_day"] = 0
-                if merged != current:
-                    setattr(profile, field, json.dumps(merged))
-                    changed = True
-                continue
-
-            if getattr(profile, field) is None:
-                setattr(profile, field, expected)
-                changed = True
-
-        if changed:
-            db.commit()
-    finally:
-        db.close()

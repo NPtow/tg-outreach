@@ -9,26 +9,6 @@ const STATUS_META = {
   not_working: { label: "Не работает", cls: "bg-red-500/10 text-red-400" },
 };
 
-const DEBUG_META = {
-  online: { label: "Online", cls: "bg-emerald-500/10 text-emerald-400" },
-  connecting: { label: "Connecting", cls: "bg-blue-500/10 text-blue-400" },
-  offline: { label: "Offline", cls: "bg-zinc-800 text-zinc-400" },
-  degraded: { label: "Degraded", cls: "bg-orange-500/10 text-orange-400" },
-  reauth_required: { label: "Needs reauth", cls: "bg-amber-500/10 text-amber-400" },
-  ok: { label: "Proxy ok", cls: "bg-emerald-500/10 text-emerald-400" },
-  failed: { label: "Proxy failed", cls: "bg-red-500/10 text-red-400" },
-  timeout: { label: "Proxy timeout", cls: "bg-orange-500/10 text-orange-400" },
-  auth_failed: { label: "Proxy auth", cls: "bg-red-500/10 text-red-400" },
-  valid: { label: "Session valid", cls: "bg-emerald-500/10 text-emerald-400" },
-  expired: { label: "Session expired", cls: "bg-amber-500/10 text-amber-400" },
-  recovering: { label: "Recovering", cls: "bg-blue-500/10 text-blue-400" },
-  recovery_failed: { label: "Recovery failed", cls: "bg-red-500/10 text-red-400" },
-  missing: { label: "No session", cls: "bg-zinc-800 text-zinc-400" },
-  eligible: { label: "Eligible", cls: "bg-emerald-500/10 text-emerald-400" },
-  blocked_proxy: { label: "Blocked by proxy", cls: "bg-red-500/10 text-red-400" },
-  blocked_auth: { label: "Blocked by auth", cls: "bg-amber-500/10 text-amber-400" },
-};
-
 function fmtTs(value) {
   if (!value) return "—";
   return new Date(value).toLocaleString("ru", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -36,10 +16,6 @@ function fmtTs(value) {
 
 function statusBadgeFor(key) {
   return STATUS_META[key] || { label: key || "unknown", cls: "bg-zinc-800 text-zinc-400" };
-}
-
-function debugBadgeFor(key) {
-  return DEBUG_META[key] || { label: key || "unknown", cls: "bg-zinc-800 text-zinc-400" };
 }
 
 function Field({ label, children }) {
@@ -165,7 +141,7 @@ function AddAccountModal({ onClose, onAdded }) {
       {step === STEPS.DONE && (
         <div className="text-center py-4">
           <div className="text-4xl mb-3">✅</div>
-          <p className="text-zinc-300 text-sm">Аккаунт подключён и переведён в новый health-runtime</p>
+          <p className="text-zinc-300 text-sm">Аккаунт подключён</p>
         </div>
       )}
       {error && <p className="text-red-400 text-xs mt-3 bg-red-500/10 px-3 py-2 rounded-lg">{error}</p>}
@@ -330,13 +306,8 @@ function ReauthModal({ account, onClose, onDone }) {
   );
 }
 
-function HealthBadge({ value }) {
+function StatusBadge({ value }) {
   const meta = statusBadgeFor(value);
-  return <span className={`text-[11px] px-2 py-1 rounded-full font-medium ${meta.cls}`}>{meta.label}</span>;
-}
-
-function DebugBadge({ value }) {
-  const meta = debugBadgeFor(value);
   return <span className={`text-[11px] px-2 py-1 rounded-full font-medium ${meta.cls}`}>{meta.label}</span>;
 }
 
@@ -360,7 +331,7 @@ export default function Accounts() {
 
   useEffect(() => { load(); }, []);
   useWsEvent((event) => {
-    if (event.event === "account_health") load();
+    if (event.event === "account_status") load();
   });
 
   const handleSetPrompt = async (accId, promptId) => {
@@ -397,7 +368,7 @@ export default function Accounts() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-xl font-semibold text-zinc-100">Accounts</h1>
-          <p className="text-sm text-zinc-500 mt-0.5">Health-aware runtime для Telegram аккаунтов</p>
+          <p className="text-sm text-zinc-500 mt-0.5">Telegram аккаунты, сессии и прокси</p>
         </div>
         <div className="flex gap-2">
           <button onClick={() => setShowTdata(true)} className="btn-secondary">+ Import tdata</button>
@@ -421,17 +392,15 @@ export default function Accounts() {
         <div className="space-y-3">
           {accounts.map((acc) => {
             const assignedPrompt = prompts.find((p) => p.id === acc.prompt_template_id);
-            const health = acc.health || {};
-            const debug = health.debug || {};
             const needsReauth = Boolean(
-              debug.needs_reauth || ["missing", "expired", "recovery_failed"].includes(debug.session_state)
+              acc.status === "not_working" && /авторизац|сесс/i.test(acc.reason || "")
             );
             return (
               <div key={acc.id} className="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4 hover:border-zinc-700 transition-colors">
                 <div className="flex items-start justify-between gap-4">
                   <div className="space-y-3 flex-1 min-w-0">
                     <div className="flex items-center gap-3">
-                      <div className={`w-2 h-2 rounded-full shrink-0 ${health.is_online ? "bg-emerald-500" : "bg-zinc-600"}`} />
+                      <div className={`w-2 h-2 rounded-full shrink-0 ${acc.is_online ? "bg-emerald-500" : "bg-zinc-600"}`} />
                       <div>
                         <p className="text-sm font-medium text-zinc-100">{acc.name}</p>
                         <p className="text-xs text-zinc-500">
@@ -443,47 +412,20 @@ export default function Accounts() {
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                      <HealthBadge value={health.status} />
+                      <StatusBadge value={acc.status} />
                       <span className="text-xs text-zinc-500">
-                        {health.reason}
+                        {acc.reason}
                       </span>
                     </div>
 
                     <div className="grid grid-cols-2 gap-3 text-[11px] text-zinc-500">
-                      <div>Онлайн: <span className="text-zinc-300">{health.is_online ? "Да" : "Нет"}</span></div>
-                      <div>Принимает входящие: <span className="text-zinc-300">{health.can_receive ? "Да" : "Нет"}</span></div>
-                      <div>Автоответ: <span className="text-zinc-300">{health.can_auto_reply ? "Готов" : "Недоступен"}</span></div>
-                      <div>Рассылка: <span className="text-zinc-300">{health.can_receive ? "Готова" : "Недоступна"}</span></div>
-                      <div>Обновлено: <span className="text-zinc-300">{fmtTs(health.updated_at)}</span></div>
+                      <div>Онлайн: <span className="text-zinc-300">{acc.is_online ? "Да" : "Нет"}</span></div>
+                      <div>Принимает входящие: <span className="text-zinc-300">{acc.can_receive ? "Да" : "Нет"}</span></div>
+                      <div>Автоответ: <span className="text-zinc-300">{acc.can_auto_reply ? "Готов" : "Недоступен"}</span></div>
+                      <div>Рассылка: <span className="text-zinc-300">{acc.can_receive ? "Готова" : "Недоступна"}</span></div>
+                      <div>Обновлено: <span className="text-zinc-300">{fmtTs(acc.updated_at)}</span></div>
                       <div>Прокси: <span className="text-zinc-300">{acc.proxy_host ? `${acc.proxy_type} ${acc.proxy_host}:${acc.proxy_port}` : "Без прокси"}</span></div>
                     </div>
-
-                    <details className="rounded-lg border border-zinc-800 bg-zinc-950/60">
-                      <summary className="cursor-pointer list-none px-3 py-2 text-xs text-zinc-400 hover:text-zinc-200 transition-colors">
-                        Debug details
-                      </summary>
-                      <div className="px-3 pb-3 pt-1 space-y-3 border-t border-zinc-800">
-                        <div className="flex flex-wrap gap-2">
-                          <DebugBadge value={debug.connection_state} />
-                          <DebugBadge value={debug.proxy_state} />
-                          <DebugBadge value={debug.session_state} />
-                          <DebugBadge value={debug.eligibility_state} />
-                        </div>
-                        <div className="grid grid-cols-2 gap-3 text-[11px] text-zinc-500">
-                          <div>Last connect: <span className="text-zinc-300">{fmtTs(debug.last_connect_at)}</span></div>
-                          <div>Last proxy check: <span className="text-zinc-300">{fmtTs(debug.last_proxy_check_at)}</span></div>
-                          <div>Last seen online: <span className="text-zinc-300">{fmtTs(debug.last_seen_online_at)}</span></div>
-                          <div>Proxy RTT: <span className="text-zinc-300">{debug.proxy_last_rtt_ms ? `${debug.proxy_last_rtt_ms} ms` : "—"}</span></div>
-                          <div>Warmup level: <span className="text-zinc-300">{debug.warmup_level || 0}</span></div>
-                          <div>Session source: <span className="text-zinc-300">{debug.session_source || "—"}</span></div>
-                        </div>
-                        {debug.last_error_message && (
-                          <p className="text-xs text-red-300 bg-red-500/10 px-3 py-2 rounded-lg">
-                            {debug.last_error_code ? `${debug.last_error_code}: ` : ""}{debug.last_error_message}
-                          </p>
-                        )}
-                      </div>
-                    </details>
 
                     <div className="flex items-center gap-2 pt-1">
                       <span className="text-[11px] text-zinc-500 shrink-0">Промпт агента:</span>
