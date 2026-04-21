@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from backend.database import get_db
 from backend.models import Account, Conversation, Message, Campaign, CampaignTarget
 from backend.runtime_config import owns_telegram_runtime
-from backend.security import decrypt_value, encrypt_value, has_secret
+from backend.security import decrypt_value, encrypt_value
 from backend.worker_client import forward_to_worker
 import backend.telegram_client as tg
 
@@ -68,29 +68,7 @@ class SetSessionRequest(BaseModel):
 
 
 def _serialize_account(account: Account) -> dict:
-    state = tg.build_account_status(account)
-    return {
-        "id": account.id,
-        "name": account.name,
-        "phone": account.phone,
-        "app_id": account.app_id,
-        "is_active": state["is_online"],
-        "status": state["status"],
-        "reason": state["reason"],
-        "is_online": state["is_online"],
-        "can_receive": state["can_receive"],
-        "can_auto_reply": state["can_auto_reply"],
-        "can_start_outreach": state["can_start_outreach"],
-        "updated_at": state["updated_at"],
-        "auto_reply": account.auto_reply,
-        "tdata_stored": has_secret(account.tdata_blob),
-        "prompt_template_id": account.prompt_template_id,
-        "created_at": account.created_at,
-        "proxy_host": account.proxy_host or "",
-        "proxy_port": account.proxy_port,
-        "proxy_type": account.proxy_type or "SOCKS5",
-        "proxy_user": account.proxy_user or "",
-    }
+    return tg.serialize_public_account(account)
 
 
 def _safe_extract_zip(archive: zipfile.ZipFile, target_dir: str) -> None:

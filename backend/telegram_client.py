@@ -34,7 +34,7 @@ from backend.models import (
     Account, Campaign, CampaignTarget, Conversation,
     DoNotContact, Message, Settings,
 )
-from backend.security import decrypt_value, encrypt_value
+from backend.security import decrypt_value, encrypt_value, has_secret
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,9 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 _ws_broadcast = None
 _MSK_OFFSET = timedelta(hours=3)
 _USERNAME_PAGE_CACHE: Dict[str, tuple[float, bool]] = {}
+_SUPPORTED_CONNECTION_STATES = {"offline", "online", "connecting", "degraded", "reauth_required"}
+_SUPPORTED_ELIGIBILITY_STATES = {"eligible", "blocked_proxy", "blocked_auth", "blocked_runtime"}
+_TRANSIENT_LIMIT_ERROR_CODES = {"PEER_FLOOD", "FLOOD_WAIT", "USERNAME_RESOLUTION_RESTRICTED"}
 
 
 def set_ws_broadcast(fn):
@@ -143,25 +146,22 @@ def _account_updated_at(account: Account) -> Optional[datetime]:
 
 def _clear_legacy_account_limit_state(account: Account) -> bool:
     dirty = False
-    if (account.connection_state or "") == "quarantined":
+    if (account.connection_state or "offline") not in _SUPPORTED_CONNECTION_STATES:
         account.connection_state = "offline"
         dirty = True
-    if (account.eligibility_state or "") == "blocked_quarantine":
-        account.eligibility_state = "blocked_auth" if getattr(account, "needs_reauth", False) else "ok"
+    if account.eligibility_state and account.eligibility_state not in _SUPPORTED_ELIGIBILITY_STATES:
+        account.eligibility_state = _compute_eligibility(account)
         dirty = True
-    if (account.last_error_code or "") in {"PEER_FLOOD", "FLOOD_WAIT", "USERNAME_RESOLUTION_RESTRICTED"}:
+    if (account.last_error_code or "") in _TRANSIENT_LIMIT_ERROR_CODES:
         account.last_error_code = None
         account.last_error_message = None
         account.last_error_at = None
-        dirty = True
-    if (account.eligibility_state or "") == "blocked_resolution":
-        account.eligibility_state = _compute_eligibility(account)
         dirty = True
     return dirty
 
 
 def _public_error_fields(account: Account) -> tuple[Optional[str], Optional[str], Optional[datetime]]:
-    if (account.last_error_code or "") in {"PEER_FLOOD", "FLOOD_WAIT", "USERNAME_RESOLUTION_RESTRICTED"}:
+    if (account.last_error_code or "") in _TRANSIENT_LIMIT_ERROR_CODES:
         return None, None, None
     return account.last_error_code, account.last_error_message, account.last_error_at
 
@@ -212,6 +212,41 @@ def build_account_status(account: Account) -> dict:
         "can_auto_reply": can_auto_reply,
         "can_start_outreach": can_start_outreach,
     }
+
+
+def serialize_public_account(account: Account) -> dict:
+    status = build_account_status(account)
+    return {
+        "id": account.id,
+        "name": account.name,
+        "phone": account.phone,
+        "app_id": account.app_id,
+        "is_active": status["is_online"],
+        "status": status["status"],
+        "reason": status["reason"],
+        "is_online": status["is_online"],
+        "can_receive": status["can_receive"],
+        "can_auto_reply": status["can_auto_reply"],
+        "can_start_outreach": status["can_start_outreach"],
+        "updated_at": status["updated_at"],
+        "auto_reply": account.auto_reply,
+        "tdata_stored": has_secret(account.tdata_blob),
+        "prompt_template_id": account.prompt_template_id,
+        "created_at": account.created_at,
+        "proxy_host": account.proxy_host or "",
+        "proxy_port": account.proxy_port,
+        "proxy_type": account.proxy_type or "SOCKS5",
+        "proxy_user": account.proxy_user or "",
+    }
+
+
+def get_public_account(account_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        return serialize_public_account(acc) if acc else {}
+    finally:
+        db.close()
 
 
 def _serialize_runtime_state(account: Account) -> dict:
@@ -382,7 +417,13 @@ async def proxy_test_account(account_id: int) -> dict:
     result = await _proxy_connectivity_check(acc)
     if _ws_broadcast:
         await _ws_broadcast({"event": "account_status", "account_id": account_id, "state": result.get("state", {})})
-    return result
+    return {
+        "ok": result.get("ok", False),
+        "proxy_state": result.get("proxy_state", "unknown"),
+        "rtt_ms": result.get("rtt_ms"),
+        "error": result.get("error"),
+        "account": get_public_account(account_id),
+    }
 
 
 def _resolve_prompt(settings: Settings, account: Account, campaign: Optional[Campaign]) -> str:
@@ -840,7 +881,7 @@ async def reconnect_account_runtime(account_id: int, requested_by: str = "system
             "requested_by": requested_by,
             "reason": "blocked_proxy",
             "steps": {"proxy": proxy_result},
-            "state": get_account_state(account_id),
+            "account": get_public_account(account_id),
         }
 
     db = SessionLocal()
@@ -848,6 +889,7 @@ async def reconnect_account_runtime(account_id: int, requested_by: str = "system
         acc = db.query(Account).filter(Account.id == account_id).first()
         ok = await start_client(acc)
         state = get_account_state(account_id)
+        account_payload = get_public_account(account_id)
         result = {
             "ok": ok,
             "requested_by": requested_by,
@@ -856,10 +898,10 @@ async def reconnect_account_runtime(account_id: int, requested_by: str = "system
                 "session": {"state": state.get("session_state")},
                 "telegram": {"ok": ok, "state": state.get("connection_state")},
             },
-            "state": state,
+            "account": account_payload,
         }
         if not ok:
-            result["reason"] = state.get("eligibility_state")
+            result["reason"] = account_payload.get("reason") or state.get("eligibility_state")
             result["error"] = state.get("last_error_message") or "Failed to connect"
         if _ws_broadcast:
             await _ws_broadcast({"event": "account_status", "account_id": account_id, "state": state})

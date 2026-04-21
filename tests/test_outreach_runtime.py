@@ -75,7 +75,7 @@ class OutreachRuntimeTests(unittest.TestCase):
 
     def test_public_status_ignores_transient_outgoing_limits(self):
         for code, message in (
-            ("PEER_FLOOD", "PeerFloodError — account quarantined"),
+            ("PEER_FLOOD", "Telegram временно ограничил исходящие"),
             ("FLOOD_WAIT", "FloodWait 600s"),
         ):
             account = Account(
@@ -126,7 +126,7 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(internal_state["eligibility_state"], "eligible")
         self.assertIsNone(internal_state["last_error_code"])
 
-    def test_public_status_normalizes_legacy_quarantined_connection_state(self):
+    def test_public_status_normalizes_unsupported_runtime_states(self):
         account = Account(
             id=17,
             name="Ana",
@@ -135,10 +135,10 @@ class OutreachRuntimeTests(unittest.TestCase):
             app_hash="hash",
             auto_reply=True,
         )
-        account.connection_state = "quarantined"
+        account.connection_state = "legacy_locked"
         account.proxy_state = "ok"
         account.session_state = "valid"
-        account.eligibility_state = "blocked_quarantine"
+        account.eligibility_state = "legacy_blocked"
 
         public_status = tg.build_account_status(account)
         internal_state = tg._serialize_runtime_state(account)
