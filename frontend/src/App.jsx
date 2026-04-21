@@ -6,7 +6,6 @@ import Contacts from "./pages/Contacts";
 import Conversations from "./pages/Conversations";
 import Prompts from "./pages/Prompts";
 import Settings from "./pages/Settings";
-import Warming from "./pages/Warming";
 import { useWS, useWsStatus } from "./ws";
 
 const NAV = [
@@ -15,7 +14,6 @@ const NAV = [
   { to: "/campaigns", label: "Campaigns", icon: "📢", eyebrow: "Execution", blurb: "Launch conservative outreach waves with strict pacing and reply stops." },
   { to: "/contacts", label: "Contacts", icon: "👥", eyebrow: "Audience", blurb: "Keep imported prospect batches searchable, editable, and campaign-ready." },
   { to: "/prompts", label: "Prompts", icon: "🧠", eyebrow: "AI Layer", blurb: "Store reusable prompt packs for account- and campaign-level agents." },
-  { to: "/warming", label: "Warming", icon: "🔥", eyebrow: "Trust Building", blurb: "Warm accounts gradually and keep long-lived maintenance observable." },
   { to: "/settings", label: "Settings", icon: "⚙️", eyebrow: "Control Plane", blurb: "Configure provider credentials, default prompts, and auto-reply behavior." },
 ];
 
@@ -219,7 +217,6 @@ function WorkspaceFrame() {
                 <Route path="/campaigns" element={<Campaigns />} />
                 <Route path="/contacts" element={<Contacts />} />
                 <Route path="/prompts" element={<Prompts />} />
-                <Route path="/warming" element={<Warming />} />
                 <Route path="/settings" element={<Settings />} />
               </Routes>
             </div>

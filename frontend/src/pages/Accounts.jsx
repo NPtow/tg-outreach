@@ -11,7 +11,6 @@ const STATE_META = {
   offline: { label: "Offline", cls: "bg-zinc-800 text-zinc-400" },
   degraded: { label: "Degraded", cls: "bg-orange-500/10 text-orange-400" },
   reauth_required: { label: "Needs reauth", cls: "bg-amber-500/10 text-amber-400" },
-  quarantined: { label: "Quarantined", cls: "bg-red-500/10 text-red-400" },
   ok: { label: "Proxy ok", cls: "bg-emerald-500/10 text-emerald-400" },
   failed: { label: "Proxy failed", cls: "bg-red-500/10 text-red-400" },
   timeout: { label: "Proxy timeout", cls: "bg-orange-500/10 text-orange-400" },
@@ -24,8 +23,6 @@ const STATE_META = {
   eligible: { label: "Ready for campaigns", cls: "bg-emerald-500/10 text-emerald-400" },
   blocked_proxy: { label: "Blocked by proxy", cls: "bg-red-500/10 text-red-400" },
   blocked_auth: { label: "Blocked by auth", cls: "bg-amber-500/10 text-amber-400" },
-  blocked_quarantine: { label: "Blocked by quarantine", cls: "bg-red-500/10 text-red-400" },
-  blocked_warmup: { label: "Blocked by warmup", cls: "bg-blue-500/10 text-blue-400" },
   blocked_resolution: { label: "Blocked by resolve", cls: "bg-orange-500/10 text-orange-400" },
 };
 
@@ -414,7 +411,7 @@ export default function Accounts() {
       </Surface>
 
       {accounts.length === 0 ? (
-        <EmptyState icon="👤" title="No Telegram accounts yet" description="Добавьте первый аккаунт или импортируйте tdata, чтобы включить campaigns, inbox monitoring и warming." />
+        <EmptyState icon="👤" title="No Telegram accounts yet" description="Добавьте первый аккаунт или импортируйте tdata, чтобы включить campaigns и inbox monitoring." />
       ) : (
         <div className="space-y-3">
           {accounts.map((acc) => {
@@ -447,15 +444,8 @@ export default function Accounts() {
                       <div>Last proxy check: <span className="text-zinc-300">{fmtTs(acc.last_proxy_check_at)}</span></div>
                       <div>Last seen online: <span className="text-zinc-300">{fmtTs(acc.last_seen_online_at)}</span></div>
                       <div>Proxy RTT: <span className="text-zinc-300">{acc.proxy_last_rtt_ms ? `${acc.proxy_last_rtt_ms} ms` : "—"}</span></div>
-                      <div>Warmup level: <span className="text-zinc-300">{acc.warmup_level || 0}</span></div>
                       <div>Session source: <span className="text-zinc-300">{acc.session_source || "—"}</span></div>
                     </div>
-
-                    {acc.quarantine_until && (
-                      <p className="text-xs text-red-300 bg-red-500/10 px-3 py-2 rounded-lg">
-                        Quarantine until {fmtTs(acc.quarantine_until)}
-                      </p>
-                    )}
 
                     {acc.last_error_message && (
                       <p className="text-xs text-red-300 bg-red-500/10 px-3 py-2 rounded-lg">
