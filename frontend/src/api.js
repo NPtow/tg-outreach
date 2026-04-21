@@ -42,6 +42,7 @@ export const api = {
   verifyCode: (data) => req("POST", "/api/accounts/verify-code", data),
   saveSession: (id) => req("POST", `/api/accounts/${id}/save-session`),
   reconnectAccount: (id) => req("POST", `/api/accounts/${id}/reconnect`),
+  setSession: (id, session_string) => req("POST", `/api/accounts/${id}/set-session`, { session_string }),
   proxyTestAccount: (id) => req("POST", `/api/accounts/${id}/proxy-test`),
   toggleReply: (id) => req("POST", `/api/accounts/${id}/toggle-reply`),
   setPrompt: (id, prompt_template_id) => req("POST", `/api/accounts/${id}/set-prompt`, { prompt_template_id }),
@@ -109,4 +110,8 @@ export const api = {
   getSettings: () => req("GET", "/api/settings/"),
   saveSettings: (data) => req("PUT", "/api/settings/", data),
 
+  // Proxy Pool
+  getProxies: () => req("GET", "/api/proxy-pool/"),
+  addProxy: (line) => req("POST", "/api/proxy-pool/", { line }),
+  deleteProxy: (id) => req("DELETE", `/api/proxy-pool/${id}`),
 };

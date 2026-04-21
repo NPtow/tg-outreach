@@ -5,6 +5,7 @@ import Campaigns from "./pages/Campaigns";
 import Contacts from "./pages/Contacts";
 import Conversations from "./pages/Conversations";
 import Prompts from "./pages/Prompts";
+import ProxyPool from "./pages/ProxyPool";
 import Settings from "./pages/Settings";
 import { useWS, useWsStatus } from "./ws";
 
@@ -14,6 +15,7 @@ const NAV = [
   { to: "/campaigns", label: "Campaigns", icon: "📢", eyebrow: "Execution", blurb: "Launch conservative outreach waves with strict pacing and reply stops." },
   { to: "/contacts", label: "Contacts", icon: "👥", eyebrow: "Audience", blurb: "Keep imported prospect batches searchable, editable, and campaign-ready." },
   { to: "/prompts", label: "Prompts", icon: "🧠", eyebrow: "AI Layer", blurb: "Store reusable prompt packs for account- and campaign-level agents." },
+  { to: "/proxies", label: "Proxies", icon: "🔌", eyebrow: "Infrastructure", blurb: "Manage shared proxy pool. One proxy per account." },
   { to: "/settings", label: "Settings", icon: "⚙️", eyebrow: "Control Plane", blurb: "Configure provider credentials, default prompts, and auto-reply behavior." },
 ];
 
@@ -217,6 +219,7 @@ function WorkspaceFrame() {
                 <Route path="/campaigns" element={<Campaigns />} />
                 <Route path="/contacts" element={<Contacts />} />
                 <Route path="/prompts" element={<Prompts />} />
+                <Route path="/proxies" element={<ProxyPool />} />
                 <Route path="/settings" element={<Settings />} />
               </Routes>
             </div>

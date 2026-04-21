@@ -4,6 +4,20 @@ from sqlalchemy.orm import relationship
 from backend.database import Base
 
 
+class ProxyPool(Base):
+    """Shared proxy pool. One proxy should be assigned to one account max."""
+    __tablename__ = "proxy_pool"
+
+    id = Column(Integer, primary_key=True)
+    label = Column(String(100), nullable=True)        # optional name
+    host = Column(String(100), nullable=False)
+    port = Column(Integer, nullable=False)
+    proxy_type = Column(String(10), default="SOCKS5")
+    username = Column(String(100), nullable=True)
+    password = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class PromptTemplate(Base):
     """Reusable GPT prompt presets. Assigned per-account or per-campaign."""
     __tablename__ = "prompt_templates"

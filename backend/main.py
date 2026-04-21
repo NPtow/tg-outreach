@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.database import init_db
 from backend.event_bus import get_latest_runtime_event_id, get_runtime_events, publish_runtime_event
 from backend.routers import accounts, conversations, settings, campaigns, prompts, dnc, contacts, internal_runtime
+from backend.routers import proxy_pool
 from backend.runtime_config import cors_allowed_origins, owns_telegram_runtime, runtime_role
 from backend.security import require_http_auth, require_ws_auth
 from backend.worker_client import forward_to_worker
@@ -80,6 +81,7 @@ app.include_router(prompts.router)
 app.include_router(dnc.router)
 app.include_router(contacts.router)
 app.include_router(internal_runtime.router)
+app.include_router(proxy_pool.router)
 
 
 async def _relay_runtime_events():

@@ -98,10 +98,10 @@ function ProxyFields({ form, setForm }) {
 
 function AddAccountModal({ onClose, onAdded }) {
   const [step, setStep] = useState(STEPS.FORM);
-  const [form, setForm] = useState({
-    name: "", phone: "", app_id: "", app_hash: "",
-    proxy_host: "", proxy_port: "", proxy_type: "SOCKS5", proxy_user: "", proxy_pass: "",
-  });
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [proxyId, setProxyId] = useState("");
+  const [proxies, setProxies] = useState([]);
   const [accountId, setAccountId] = useState(null);
   const [phoneCodeHash, setPhoneCodeHash] = useState("");
   const [code, setCode] = useState("");
@@ -109,10 +109,22 @@ function AddAccountModal({ onClose, onAdded }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => { api.getProxies().then(setProxies); }, []);
+
   const handleCreate = async () => {
     setError(""); setLoading(true);
     try {
-      const payload = { ...form, proxy_port: form.proxy_port ? Number(form.proxy_port) : null };
+      const selectedProxy = proxies.find(p => String(p.id) === String(proxyId));
+      const payload = {
+        name, phone,
+        ...(selectedProxy ? {
+          proxy_host: selectedProxy.host,
+          proxy_port: selectedProxy.port,
+          proxy_type: selectedProxy.proxy_type,
+          proxy_user: selectedProxy.username || "",
+          proxy_pass: selectedProxy.has_password ? "__keep__" : "",
+        } : {}),
+      };
       const acc = await api.createAccount(payload);
       setAccountId(acc.id);
       const result = await api.sendCode(acc.id);
@@ -133,38 +145,49 @@ function AddAccountModal({ onClose, onAdded }) {
   };
 
   return (
-    <Modal title={step === STEPS.DONE ? "Готово!" : step === STEPS.CODE ? "Введи код" : "Добавить аккаунт"} onClose={onClose} wide={step === STEPS.FORM}>
+    <Modal title={step === STEPS.DONE ? "Готово!" : step === STEPS.CODE ? "Введи код из Telegram" : "Добавить аккаунт"} onClose={onClose}>
       {step === STEPS.FORM && (
-        <div className="space-y-3">
-          <p className="text-xs text-zinc-500 bg-zinc-800/50 rounded-lg px-3 py-2">
-            App ID и App Hash получи на <a href="https://my.telegram.org" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">my.telegram.org</a>.
-          </p>
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="Название"><Input placeholder="Мой аккаунт" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-            <Field label="Номер телефона"><Input placeholder="+79001234567" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
-            <Field label="App ID"><Input placeholder="12345678" value={form.app_id} onChange={(e) => setForm({ ...form, app_id: e.target.value })} /></Field>
-            <Field label="App Hash"><Input placeholder="abcdef..." value={form.app_hash} onChange={(e) => setForm({ ...form, app_hash: e.target.value })} /></Field>
-          </div>
-          <ProxyFields form={form} setForm={setForm} />
+        <div className="space-y-4">
+          <Field label="Название">
+            <Input placeholder="Kenny" value={name} onChange={e => setName(e.target.value)} />
+          </Field>
+          <Field label="Номер телефона">
+            <Input placeholder="+573126523653" value={phone} onChange={e => setPhone(e.target.value)} />
+          </Field>
+          <Field label="Прокси">
+            <select
+              className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-blue-500"
+              value={proxyId} onChange={e => setProxyId(e.target.value)}>
+              <option value="">— без прокси —</option>
+              {proxies.map(p => (
+                <option key={p.id} value={p.id}>
+                  {p.host}:{p.port}{p.username ? ` (${p.username})` : ""}{p.used_by ? ` — занят: ${p.used_by}` : ""}
+                </option>
+              ))}
+            </select>
+            {proxies.length === 0 && (
+              <p className="text-[11px] text-zinc-600 mt-1">Нет прокси в пуле — добавь на странице <span className="text-blue-400">Proxies</span></p>
+            )}
+          </Field>
         </div>
       )}
       {step === STEPS.CODE && (
-        <div className="space-y-3">
-          <p className="text-sm text-zinc-400">Код отправлен на <span className="text-zinc-200 font-medium">{form.phone}</span></p>
-          <Field label="Код из Telegram"><Input placeholder="12345" value={code} onChange={(e) => setCode(e.target.value)} /></Field>
-          <Field label="2FA пароль (если есть)"><Input type="password" placeholder="••••••" value={password} onChange={(e) => setPassword(e.target.value)} /></Field>
+        <div className="space-y-4">
+          <p className="text-sm text-zinc-400">Код отправлен на <span className="text-zinc-200 font-medium">{phone}</span></p>
+          <Field label="Код из Telegram"><Input placeholder="12345" value={code} onChange={e => setCode(e.target.value)} autoFocus /></Field>
+          <Field label="2FA пароль (если есть)"><Input type="password" placeholder="••••••" value={password} onChange={e => setPassword(e.target.value)} /></Field>
         </div>
       )}
       {step === STEPS.DONE && (
         <div className="text-center py-4">
           <div className="text-4xl mb-3">✅</div>
-          <p className="text-zinc-300 text-sm">Аккаунт подключён и переведён в новый health-runtime</p>
+          <p className="text-zinc-300 text-sm">Аккаунт подключён, сессия сохранена</p>
         </div>
       )}
       {error && <p className="text-red-400 text-xs mt-3 bg-red-500/10 px-3 py-2 rounded-lg">{error}</p>}
       <div className="flex gap-2 mt-5">
-        {step === STEPS.FORM && <button onClick={handleCreate} disabled={loading} className="btn-primary">{loading ? "Отправляю..." : "Отправить код"}</button>}
-        {step === STEPS.CODE && <button onClick={handleVerify} disabled={loading} className="btn-primary">{loading ? "Проверяю..." : "Подтвердить"}</button>}
+        {step === STEPS.FORM && <button onClick={handleCreate} disabled={loading || !name || !phone} className="btn-primary">{loading ? "Отправляю..." : "Отправить код"}</button>}
+        {step === STEPS.CODE && <button onClick={handleVerify} disabled={loading || !code} className="btn-primary">{loading ? "Проверяю..." : "Подтвердить"}</button>}
         <button onClick={onClose} className="btn-ghost">{step === STEPS.DONE ? "Закрыть" : "Отмена"}</button>
       </div>
     </Modal>
@@ -473,9 +496,9 @@ export default function Accounts() {
                     <button onClick={() => handleProxyTest(acc.id)} disabled={proxyTesting[acc.id]} className="text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-300 px-3 py-1.5 rounded-lg font-medium transition-colors disabled:opacity-50">
                       {proxyTesting[acc.id] ? "Тестирую..." : "Test Proxy"}
                     </button>
-                    {acc.needs_reauth ? (
+                    {(acc.needs_reauth || acc.session_state === "expired" || acc.session_state === "missing") ? (
                       <button onClick={() => setReauthAccount(acc)} className="text-xs bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded-lg font-medium transition-colors">
-                        Авторизовать
+                        Re-auth
                       </button>
                     ) : (
                       <button onClick={() => handleReconnect(acc.id)} disabled={reconnecting[acc.id]} className="text-xs bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded-lg font-medium transition-colors disabled:opacity-50">

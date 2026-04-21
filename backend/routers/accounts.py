@@ -27,8 +27,8 @@ router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 class AccountCreate(BaseModel):
     name: str
     phone: str
-    app_id: str
-    app_hash: str
+    app_id: str = "2040"
+    app_hash: str = "b18441a1ff607e10a989891a5462e627"
     proxy_host: str = ""
     proxy_port: Optional[int] = None
     proxy_type: str = "SOCKS5"

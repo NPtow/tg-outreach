@@ -1044,13 +1044,18 @@ async def _run_client(client: TelegramClient, account_id: int):
         db.close()
 
 
+_last_keepalive: Dict[int, float] = {}
+_KEEPALIVE_INTERVAL = 3 * 3600  # 3 hours
+
+
 async def _supervise_accounts():
-    """Background supervisor: restarts dropped clients every 60s."""
+    """Background supervisor: restarts dropped clients every 60s, keep-alive every 3h."""
     while True:
         await asyncio.sleep(60)
         db = SessionLocal()
         try:
             accounts = db.query(Account).all()
+            now = asyncio.get_event_loop().time()
             for acc in accounts:
                 dirty = _clear_legacy_account_limit_state(acc)
                 if dirty:
@@ -1067,6 +1072,17 @@ async def _supervise_accounts():
                     if ok:
                         acc.is_active = True
                         db.commit()
+                elif acc.id in _clients:
+                    # Keep-alive: ping Telegram so session never goes idle
+                    last = _last_keepalive.get(acc.id, 0)
+                    if now - last > _KEEPALIVE_INTERVAL:
+                        try:
+                            client = _clients[acc.id]
+                            await client.get_me()
+                            _last_keepalive[acc.id] = now
+                            logger.debug(f"Keep-alive OK for account {acc.id}")
+                        except Exception as e:
+                            logger.warning(f"Keep-alive failed for account {acc.id}: {e}")
         except Exception as e:
             logger.error(f"Supervisor error: {e}")
         finally:
