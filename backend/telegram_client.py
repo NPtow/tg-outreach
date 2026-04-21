@@ -887,8 +887,23 @@ async def _supervise_accounts():
         try:
             accounts = db.query(Account).all()
             for acc in accounts:
+                # Clear stale quarantine state (field + legacy string values from old code)
+                dirty = False
                 if acc.quarantine_until:
                     acc.quarantine_until = None
+                    dirty = True
+                if acc.connection_state == "quarantined":
+                    acc.connection_state = "offline"
+                    dirty = True
+                if acc.eligibility_state == "blocked_quarantine":
+                    acc.eligibility_state = "ok"
+                    dirty = True
+                # Clear resolution restriction so account can be retried next campaign
+                if acc.last_error_code == "USERNAME_RESOLUTION_RESTRICTED":
+                    acc.last_error_code = None
+                    acc.last_error_message = None
+                    dirty = True
+                if dirty:
                     db.commit()
 
                 if not acc.last_proxy_check_at or (_utcnow() - acc.last_proxy_check_at).total_seconds() > 300:

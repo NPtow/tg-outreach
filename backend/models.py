@@ -154,7 +154,7 @@ class Campaign(Base):
     # Prompt override for auto-replies on this campaign's conversations
     prompt_template_id = Column(Integer, ForeignKey("prompt_templates.id"), nullable=True)
     # Stop conditions
-    stop_on_reply = Column(Boolean, default=True)   # pause auto-reply when person responds
+    stop_on_reply = Column(Boolean, default=False)   # pause auto-reply when person responds
     stop_keywords = Column(Text, nullable=True)      # comma-separated: "нет,отписка,стоп"
     hot_keywords = Column(Text, nullable=True)       # comma-separated: "интересно,расскажи"
     max_messages = Column(Integer, nullable=True)    # max GPT replies per conversation

@@ -61,7 +61,7 @@ def init_db():
         ("campaigns", "send_hour_from INTEGER DEFAULT 9"),
         ("campaigns", "send_hour_to INTEGER DEFAULT 21"),
         ("campaigns", "prompt_template_id INTEGER"),
-        ("campaigns", "stop_on_reply INTEGER DEFAULT 1"),
+        ("campaigns", "stop_on_reply INTEGER DEFAULT 0"),
         ("campaigns", "stop_keywords TEXT"),
         ("campaigns", "hot_keywords TEXT"),
         ("campaigns", "max_messages INTEGER"),
