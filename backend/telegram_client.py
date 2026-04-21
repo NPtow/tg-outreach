@@ -788,7 +788,13 @@ async def start_client(account: Account, _tdata_retried: bool = False) -> bool:
     _persist_account_health(account.id, connection_state="connecting", session_state=_derive_session_state(account))
     client = _make_client(account)
     try:
-        await client.connect()
+        try:
+            await asyncio.wait_for(client.connect(), timeout=30)
+        except asyncio.TimeoutError:
+            logger.error(f"Account {account.id}: connect() timed out after 30s")
+            await client.disconnect()
+            _mark_error(account.id, "CONNECT_TIMEOUT", "Connection timed out", connection_state="degraded")
+            return False
         if not await client.is_user_authorized():
             logger.warning(f"Account {account.id} session expired — needs re-auth")
             await client.disconnect()
