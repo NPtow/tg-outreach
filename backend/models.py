@@ -1,5 +1,5 @@
-from datetime import datetime, date
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, Text, ForeignKey
+from datetime import datetime
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey
 from sqlalchemy.orm import relationship
 from backend.database import Base
 
@@ -56,8 +56,6 @@ class Account(Base):
     last_proxy_check_at = Column(DateTime, nullable=True)
     last_connect_at = Column(DateTime, nullable=True)
     last_seen_online_at = Column(DateTime, nullable=True)
-    quarantine_until = Column(DateTime, nullable=True)
-    warmup_level = Column(Integer, default=0)
     session_source = Column(String(30), nullable=True)
     proxy_last_rtt_ms = Column(Integer, nullable=True)
     # Custom prompt for this account (overrides global Settings.system_prompt)
@@ -154,13 +152,10 @@ class Campaign(Base):
     # Prompt override for auto-replies on this campaign's conversations
     prompt_template_id = Column(Integer, ForeignKey("prompt_templates.id"), nullable=True)
     # Stop conditions
-    stop_on_reply = Column(Boolean, default=True)   # pause auto-reply when person responds
+    stop_on_reply = Column(Boolean, default=False)   # pause auto-reply when person responds
     stop_keywords = Column(Text, nullable=True)      # comma-separated: "нет,отписка,стоп"
     hot_keywords = Column(Text, nullable=True)       # comma-separated: "интересно,расскажи"
     max_messages = Column(Integer, nullable=True)    # max GPT replies per conversation
-    # Warming gate: 0 = disabled, >0 = account health_score must reach this before sending
-    min_health_score = Column(Integer, default=0)
-
     targets = relationship("CampaignTarget", back_populates="campaign")
     prompt_template = relationship("PromptTemplate", foreign_keys=[prompt_template_id])
 
@@ -181,106 +176,6 @@ class CampaignTarget(Base):
     error = Column(Text, nullable=True)
 
     campaign = relationship("Campaign", back_populates="targets")
-
-
-class WarmingProfile(Base):
-    """Template defining per-phase action quotas and phase durations."""
-    __tablename__ = "warming_profiles"
-
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100), nullable=False)
-    description = Column(String(300), nullable=True)
-    phase_1_days = Column(Integer, default=3)   # days in phase 1 (mutual msgs only)
-    phase_2_days = Column(Integer, default=7)   # days in phase 2 (subscribe + react)
-    # phase 3 runs until maintenance or forever
-    phase_1_config = Column(Text, nullable=False)  # JSON: {online_sessions, mutual_messages, searches, dialog_reads}
-    phase_2_config = Column(Text, nullable=False)  # JSON: + subscriptions_per_day, reactions_per_day
-    phase_3_config = Column(Text, nullable=False)  # JSON: full activity
-    maintenance_config = Column(Text, nullable=False)  # JSON: minimal keep-alive actions
-    permanent_maintenance = Column(Boolean, default=False)  # True → after phase 3 stay in maintenance forever
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    warmings = relationship("AccountWarming", back_populates="profile")
-
-
-class AccountWarming(Base):
-    """Active warming task for one account."""
-    __tablename__ = "account_warmings"
-
-    id = Column(Integer, primary_key=True)
-    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False, unique=True)
-    profile_id = Column(Integer, ForeignKey("warming_profiles.id"), nullable=False)
-    status = Column(String(20), default="warming")  # warming | maintenance | paused | completed
-    phase = Column(Integer, default=1)              # 1 | 2 | 3
-    campaign_label = Column(String(100), nullable=True)   # A/B group tag e.g. "7day", "14day"
-    started_at = Column(DateTime, default=datetime.utcnow)
-    phase_started_at = Column(DateTime, default=datetime.utcnow)
-    last_action_at = Column(DateTime, nullable=True)
-    last_success_at = Column(DateTime, nullable=True)
-    last_tick_at = Column(DateTime, nullable=True)
-    next_action_at = Column(DateTime, nullable=True)
-    last_decision = Column(String(100), nullable=True)
-    last_error_at = Column(DateTime, nullable=True)
-    last_error_message = Column(Text, nullable=True)
-    blocked_actions = Column(Text, default="{}")      # JSON map[action_key] -> {reason, until, details}
-    health_score = Column(Integer, default=0)        # 0–100
-    subscribed_channels = Column(Text, default="[]") # JSON list[str]
-    peer_account_ids = Column(Text, default="[]")    # JSON list[int] — accounts to mutual-msg with
-    actions_today = Column(Integer, default=0)
-    actions_today_date = Column(Date, nullable=True) # date of last reset
-    online_sessions_today = Column(Integer, default=0)
-    subscriptions_today = Column(Integer, default=0)
-    reactions_today = Column(Integer, default=0)
-    searches_today = Column(Integer, default=0)
-    dialog_reads_today = Column(Integer, default=0)
-    mutual_messages_today = Column(Integer, default=0)
-    total_actions = Column(Integer, default=0)
-    ban_events = Column(Integer, default=0)          # flood/spam events counter
-
-    profile = relationship("WarmingProfile", back_populates="warmings")
-    actions = relationship("WarmingAction", back_populates="warming", order_by="WarmingAction.executed_at")
-
-
-class WarmingAction(Base):
-    """Log of every action taken during warming."""
-    __tablename__ = "warming_actions"
-
-    id = Column(Integer, primary_key=True)
-    account_warming_id = Column(Integer, ForeignKey("account_warmings.id"), nullable=False)
-    action_type = Column(String(30), nullable=False)  # online|offline|subscribe|react|msg_sent|msg_received|search|read_dialog
-    target = Column(String(300), nullable=True)        # channel username, peer phone, search query
-    result = Column(String(20), nullable=False)        # success|failed|flood_wait|skipped
-    flood_wait_seconds = Column(Integer, nullable=True)
-    details = Column(Text, nullable=True)              # JSON extra info
-    error_message = Column(Text, nullable=True)
-    decision_context = Column(Text, nullable=True)
-    attempted_at = Column(DateTime, default=datetime.utcnow)
-    completed_at = Column(DateTime, nullable=True)
-    executed_at = Column(DateTime, default=datetime.utcnow)
-
-    warming = relationship("AccountWarming", back_populates="actions")
-
-
-class WarmingChannelPool(Base):
-    """Pool of Telegram channels/groups used for warming subscriptions."""
-    __tablename__ = "warming_channel_pool"
-
-    id = Column(Integer, primary_key=True)
-    username = Column(String(100), nullable=False, unique=True)
-    title = Column(String(200), nullable=True)
-    niche = Column(String(50), nullable=True)     # tech|business|general|crypto|marketing|news|humor
-    language = Column(String(10), default="ru")
-    subscriber_count = Column(Integer, nullable=True)
-    entity_type = Column(String(30), nullable=True)
-    peer_id = Column(String(50), nullable=True)
-    access_hash = Column(String(50), nullable=True)
-    invite_link = Column(String(300), nullable=True)
-    verification_status = Column(String(20), default="unknown")  # unknown|verified|resolve_failed
-    last_verified_at = Column(DateTime, nullable=True)
-    last_resolve_error = Column(Text, nullable=True)
-    resolve_fail_count = Column(Integer, default=0)
-    is_active = Column(Boolean, default=True)
-    added_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Settings(Base):

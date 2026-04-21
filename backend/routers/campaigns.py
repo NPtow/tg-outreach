@@ -29,7 +29,7 @@ class CampaignCreate(BaseModel):
     send_hour_to: int = 21
     send_window_enabled: bool = False
     prompt_template_id: Optional[int] = None
-    stop_on_reply: bool = True
+    stop_on_reply: bool = False
     stop_keywords: Optional[str] = None   # comma-separated
     hot_keywords: Optional[str] = None    # comma-separated
     max_messages: Optional[int] = None
@@ -199,6 +199,9 @@ def get_targets(campaign_id: int, status: Optional[str] = None, db: Session = De
             "role": t.role,
             "custom_note": t.custom_note,
             "status": t.status,
+            "error": t.error,
+            "sent_at": t.sent_at,
+            "account_id": t.account_id,
         }
         for t in targets
     ]

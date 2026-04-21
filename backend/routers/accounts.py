@@ -13,9 +13,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import Account
+from backend.models import Account, Conversation, Message, Campaign, CampaignTarget
 from backend.runtime_config import owns_telegram_runtime
-from backend.security import decrypt_value, encrypt_value, has_secret
+from backend.security import decrypt_value, encrypt_value
 from backend.worker_client import forward_to_worker
 import backend.telegram_client as tg
 
@@ -63,37 +63,12 @@ class SetPromptRequest(BaseModel):
     prompt_template_id: Optional[int]
 
 
+class SetSessionRequest(BaseModel):
+    session_string: str
+
+
 def _serialize_account(account: Account) -> dict:
-    return {
-        "id": account.id,
-        "name": account.name,
-        "phone": account.phone,
-        "app_id": account.app_id,
-        "is_active": account.connection_state == "online",
-        "auto_reply": account.auto_reply,
-        "needs_reauth": bool(getattr(account, "needs_reauth", False)),
-        "tdata_stored": has_secret(account.tdata_blob),
-        "prompt_template_id": account.prompt_template_id,
-        "created_at": account.created_at,
-        "proxy_host": account.proxy_host or "",
-        "proxy_port": account.proxy_port,
-        "proxy_type": account.proxy_type or "SOCKS5",
-        "proxy_user": account.proxy_user or "",
-        "connection_state": account.connection_state or "offline",
-        "proxy_state": account.proxy_state or "unknown",
-        "session_state": account.session_state or "missing",
-        "eligibility_state": account.eligibility_state or "blocked_auth",
-        "last_error_code": account.last_error_code,
-        "last_error_message": account.last_error_message,
-        "last_error_at": account.last_error_at,
-        "last_proxy_check_at": account.last_proxy_check_at,
-        "last_connect_at": account.last_connect_at,
-        "last_seen_online_at": account.last_seen_online_at,
-        "quarantine_until": account.quarantine_until,
-        "warmup_level": account.warmup_level or 0,
-        "session_source": account.session_source or "",
-        "proxy_last_rtt_ms": account.proxy_last_rtt_ms,
-    }
+    return tg.serialize_public_account(account)
 
 
 def _safe_extract_zip(archive: zipfile.ZipFile, target_dir: str) -> None:
@@ -113,14 +88,6 @@ async def _forward_or_fail(method: str, path: str, json_body: Optional[dict] = N
 def list_accounts(db: Session = Depends(get_db)):
     accounts = db.query(Account).all()
     return [_serialize_account(a) for a in accounts]
-
-
-@router.get("/{account_id}/health")
-def get_account_health(account_id: int, db: Session = Depends(get_db)):
-    acc = db.query(Account).filter(Account.id == account_id).first()
-    if not acc:
-        raise HTTPException(404, "Account not found")
-    return _serialize_account(acc)
 
 
 def _generate_device_params(account_id: int) -> dict:
@@ -315,6 +282,38 @@ async def reconnect_account(account_id: int, db: Session = Depends(get_db)):
     return result
 
 
+@router.post("/{account_id}/set-session")
+async def set_session(account_id: int, data: SetSessionRequest, db: Session = Depends(get_db)):
+    """Upload a session string to an existing account and reconnect."""
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    acc.session_string = encrypt_value(data.session_string)
+    acc.session_source = "session_string"
+    acc.needs_reauth = False
+    db.commit()
+    if owns_telegram_runtime():
+        result = await tg.reconnect_account_runtime(account_id, requested_by="set-session")
+    else:
+        result = await _forward_or_fail("POST", f"/internal/runtime/accounts/{account_id}/reconnect")
+    return {"ok": True, "runtime": result}
+
+
+@router.post("/{account_id}/unblock")
+async def unblock_account(account_id: int, db: Session = Depends(get_db)):
+    """Reset account runtime state through the owning telegram worker."""
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    if owns_telegram_runtime():
+        result = await tg.reset_account_runtime(account_id, requested_by="api-unblock")
+    else:
+        result = await _forward_or_fail("POST", f"/internal/runtime/accounts/{account_id}/unblock")
+    if not result.get("ok"):
+        raise HTTPException(400, result)
+    return result
+
+
 @router.post("/{account_id}/toggle-reply")
 def toggle_reply(account_id: int, db: Session = Depends(get_db)):
     acc = db.query(Account).filter(Account.id == account_id).first()
@@ -430,6 +429,23 @@ async def delete_account(account_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Account not found")
     if owns_telegram_runtime():
         await tg.stop_client(account_id)
+    # Delete related records to avoid FK constraint failures
+    for conv in db.query(Conversation).filter(Conversation.account_id == account_id).all():
+        db.query(Message).filter(Message.conversation_id == conv.id).delete()
+        db.delete(conv)
+    import json as _json
+    db.query(CampaignTarget).filter(CampaignTarget.account_id == account_id).update({"account_id": None})
+    for camp in db.query(Campaign).all():
+        ids = [i for i in (_json.loads(camp.account_ids) if camp.account_ids else [camp.account_id]) if i != account_id]
+        if not ids:
+            # No accounts left — delete campaign and its targets
+            db.query(CampaignTarget).filter(CampaignTarget.campaign_id == camp.id).delete()
+            db.delete(camp)
+        elif camp.account_id == account_id:
+            camp.account_id = ids[0]
+            camp.account_ids = _json.dumps(ids)
+        else:
+            camp.account_ids = _json.dumps(ids)
     db.delete(acc)
     db.commit()
     return {"ok": True}

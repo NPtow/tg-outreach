@@ -1,21 +1,28 @@
-# TG Outreach Self-Healing Runtime Plan
+# TG Outreach Minimal Accounts Plan
 
 ## Goal
-- Split the app into `web` and `telegram-worker` runtime roles.
-- Make account health explicit and observable.
-- Ensure campaigns only run on eligible accounts with conservative anti-ban behavior.
+- Remove the invented account health model from public API/UI.
+- Remove the warming module completely from backend, frontend, models, bootstrap, and tests.
+- Keep accounts simple: DB row, Telegram session, proxy, and live Telethon client.
+- Public account output exposes only direct status fields: `status`, `reason`, `is_online`, `can_receive`, `can_auto_reply`, `can_start_outreach`.
 
-## Milestones
-- [x] Add runtime foundations: role config, worker forwarding, auth, encryption, event relay.
-- [x] Extend persistence with account health fields and runtime event storage.
-- [x] Rework Telegram runtime for health-aware reconnect, proxy checks, quarantine, and preflight campaign start.
-- [x] Update public API for account health, proxy test, runtime status, and safe campaign start.
-- [x] Update frontend for account health, proxy management, worker status, and structured campaign failures.
-- [~] Validate build/runtime flows and document deploy assumptions for Railway `web` + `worker`.
-- [~] Add username-resolution restriction detection so campaigns block restricted accounts instead of falsely failing valid public usernames.
-- [~] Repair warming execution path so Phase 1 performs real actions, quotas are enforced, and progress/heartbeats are observable in API and UI.
+## Required Blocks
+- Accounts CRUD and tdata/session import.
+- Telegram runtime connect/reconnect/send/receive.
+- Campaign sending.
+- Inbox persistence and AI replies.
+- Settings, prompts, contacts, conversations, DNC.
 
-## Validation Assumptions
-- Backend syntax: `python3 -m compileall backend`
-- Frontend typecheck: `cd frontend && npx tsc --noEmit`
-- Full smoke: start app in `TG_RUNTIME_ROLE=all` locally and verify API/UI
+## Removed Blocks
+- Warming worker.
+- Warming router and `/api/warming/*`.
+- Warming frontend page and sidebar item.
+- Warming ORM models and bootstrap columns.
+- Nested account diagnostic payload.
+- `/api/accounts/{id}/health`.
+
+## Validation
+- Backend compile: `/Users/NIKITA/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m compileall backend`
+- Runtime tests: `/Users/NIKITA/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m unittest discover -s tests -p 'test_outreach_runtime.py'`
+- Frontend build: `cd frontend && npm run build`
+- Search gate: no backend/frontend references to warming; no public account `health` payload.

@@ -206,7 +206,7 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
     send_window_enabled: false,
     send_hour_from: 9, send_hour_to: 21,
     prompt_template_id: "",
-    stop_on_reply: true,
+    stop_on_reply: false,
     stop_keywords: "",
     hot_keywords: "",
     max_messages: "",
@@ -219,7 +219,7 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
   const [showPicker, setShowPicker] = useState(false);
 
   const inputCls = "w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 transition-colors";
-  const activeAccounts = accounts.filter(a => a.eligibility_state === "eligible");
+  const activeAccounts = accounts.filter(a => a.can_receive);
 
   const toggleAccount = (id) => {
     setForm(f => {

@@ -12,14 +12,14 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.database import init_db
 from backend.event_bus import get_latest_runtime_event_id, get_runtime_events, publish_runtime_event
-from backend.routers import accounts, conversations, settings, campaigns, prompts, dnc, contacts, internal_runtime, warming
+from backend.routers import accounts, conversations, settings, campaigns, prompts, dnc, contacts, internal_runtime
 from backend.runtime_config import cors_allowed_origins, owns_telegram_runtime, runtime_role
 from backend.security import require_http_auth, require_ws_auth
 from backend.worker_client import forward_to_worker
 import backend.telegram_client as tg
-import backend.warming_worker as ww
 
-logging.basicConfig(level=logging.INFO)
+import sys
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(levelname)s:%(name)s:%(message)s")
 
 # WebSocket connection manager
 _ws_clients: Set[WebSocket] = set()
@@ -43,7 +43,6 @@ async def lifespan(app: FastAPI):
     relay_task = None
     if owns_telegram_runtime():
         await tg.start_all_accounts()
-        await ww.start_all_warming_tasks()
     else:
         relay_task = asyncio.create_task(_relay_runtime_events())
     yield
@@ -59,7 +58,7 @@ app = FastAPI(title="TG Outreach", lifespan=lifespan)
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if request.url.path.startswith("/api") and request.url.path != "/api/health":
+    if request.url.path.startswith("/api"):
         if not require_http_auth(request.headers.get("X-App-Token")):
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     return await call_next(request)
@@ -81,7 +80,6 @@ app.include_router(prompts.router)
 app.include_router(dnc.router)
 app.include_router(contacts.router)
 app.include_router(internal_runtime.router)
-app.include_router(warming.router)
 
 
 async def _relay_runtime_events():
@@ -112,11 +110,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()  # keep alive
     except WebSocketDisconnect:
         _ws_clients.discard(websocket)
-
-
-@app.get("/api/health")
-def health():
-    return {"ok": True}
 
 
 @app.get("/api/runtime/status")

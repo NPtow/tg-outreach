@@ -1,26 +1,20 @@
-# TG Outreach Test Plan
+# TG Outreach Minimal Accounts Test Plan
 
-## Critical Flows
-- Account with valid proxy reconnects and becomes `eligible`
-- Broken proxy yields `blocked_proxy`
-- Expired session with stored `tdata` recovers automatically
-- Expired session without recovery path yields `reauth_required`
-- Campaign start returns structured blocked reasons when no eligible accounts exist
-- Campaign continues using healthy accounts while quarantining risky ones
-- Campaign pauses or blocks an account when Telegram cannot resolve a publicly existing username
-- Web UI works against same-origin API and configurable WebSocket URL
-- Settings API does not return secret values
-- Warming start produces a heartbeat within minutes and logs attempted/success/skipped action rows
-- Warming score stays near zero when no actions were executed
-- Phase 1 can subscribe to one channel per day when pool entries are available
-- Warming UI refreshes without manual reload and shows last decision / next action / last error
+## Checks
+- Account list returns direct fields: `status`, `reason`, `is_online`, `can_receive`, `can_auto_reply`, `can_start_outreach`.
+- Account list does not return nested diagnostic account payload.
+- Removed warming files are not imported by backend or frontend.
+- Campaign account picker uses direct `can_receive`.
+- Inbox and auto-reply regression tests still pass.
 
 ## Commands
-- `python3 -m compileall backend`
-- `cd frontend && npx tsc --noEmit`
+- `/Users/NIKITA/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m compileall backend`
+- `/Users/NIKITA/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m unittest discover -s tests -p 'test_outreach_runtime.py'`
+- `cd frontend && npm run build`
+- `rg -n "warming|Warming|warmup|warm_|min_health_score|AccountWarming|WarmingAction|WarmingProfile|WarmingChannelPool|account_health" backend frontend/src tests`
 
-## Manual Smoke
-- Open Accounts page, inspect worker/account health chips
-- Run proxy test on one account
-- Start a campaign with at least one blocked account and verify structured response
-- Confirm live updates arrive after worker emits campaign/account events
+## Production Smoke
+- Deploy Railway service `tg-outreach`.
+- Call `GET /api/accounts/`.
+- Confirm each account has direct status fields and no nested diagnostic payload.
+- Confirm `/api/warming/*` is gone.
