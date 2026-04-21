@@ -122,6 +122,102 @@ def _compute_eligibility(account: Account) -> str:
     return "blocked_auth"
 
 
+def _account_updated_at(account: Account) -> Optional[datetime]:
+    timestamps = [
+        account.last_error_at,
+        account.last_connect_at,
+        account.last_seen_online_at,
+        account.last_proxy_check_at,
+    ]
+    timestamps = [ts for ts in timestamps if ts]
+    return max(timestamps) if timestamps else None
+
+
+def _clear_legacy_quarantine_state(account: Account) -> bool:
+    dirty = False
+    if getattr(account, "quarantine_until", None):
+        account.quarantine_until = None
+        dirty = True
+    if (account.connection_state or "") == "quarantined":
+        account.connection_state = "offline"
+        dirty = True
+    if (account.eligibility_state or "") == "blocked_quarantine":
+        account.eligibility_state = "blocked_auth" if getattr(account, "needs_reauth", False) else "ok"
+        dirty = True
+    return dirty
+
+
+def build_public_account_health(account: Account) -> dict:
+    connection_state = account.connection_state or "offline"
+    proxy_state = account.proxy_state or "unknown"
+    session_state = account.session_state or _derive_session_state(account)
+    last_error_code = account.last_error_code or ""
+    needs_reauth = bool(getattr(account, "needs_reauth", False))
+
+    proxy_ok = proxy_state not in {"failed", "timeout", "auth_failed"}
+    session_ok = not needs_reauth and session_state not in {"missing", "expired", "recovery_failed"}
+    is_online = connection_state == "online"
+    can_receive = bool(is_online and proxy_ok and session_ok)
+    can_auto_reply = bool(can_receive and getattr(account, "auto_reply", False))
+    outgoing_limited = last_error_code in {"PEER_FLOOD", "FLOOD_WAIT"}
+    can_start_outreach = bool(can_receive and not outgoing_limited)
+    status = "working" if can_receive else "not_working"
+
+    if status == "working":
+        if last_error_code == "PEER_FLOOD":
+            reason = "Аккаунт онлайн, но Telegram временно ограничил исходящие сообщения"
+        elif last_error_code == "FLOOD_WAIT":
+            reason = "Аккаунт онлайн, но Telegram временно ограничил исходящие сообщения"
+        elif last_error_code == "USERNAME_RESOLUTION_RESTRICTED":
+            reason = "Аккаунт онлайн, но часть username не резолвится через Telegram API"
+        else:
+            reason = "Аккаунт онлайн и принимает сообщения"
+    elif last_error_code == "UserDeactivatedBanError":
+        reason = "Telegram деактивировал аккаунт"
+    elif last_error_code in {"AuthKeyDuplicatedError", "AuthKeyUnregisteredError"}:
+        reason = "Сессия Telegram отозвана, нужна повторная авторизация"
+    elif needs_reauth or session_state in {"missing", "expired", "recovery_failed"}:
+        reason = "Нужна повторная авторизация"
+    elif proxy_state == "auth_failed":
+        reason = "Прокси не принял логин или пароль"
+    elif proxy_state == "timeout":
+        reason = "Прокси не отвечает вовремя"
+    elif proxy_state == "failed":
+        reason = "Прокси не работает"
+    elif connection_state == "connecting":
+        reason = "Аккаунт подключается к Telegram"
+    elif connection_state == "degraded" or last_error_code == "CONNECT_FAILED":
+        reason = "Не удалось подключить Telegram-клиент"
+    else:
+        reason = "Telegram-клиент не подключён"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "updated_at": _account_updated_at(account),
+        "is_online": is_online,
+        "can_receive": can_receive,
+        "can_auto_reply": can_auto_reply,
+        "can_start_outreach": can_start_outreach,
+        "debug": {
+            "connection_state": connection_state,
+            "proxy_state": proxy_state,
+            "session_state": session_state,
+            "eligibility_state": account.eligibility_state or _compute_eligibility(account),
+            "last_error_code": account.last_error_code,
+            "last_error_message": account.last_error_message,
+            "last_error_at": account.last_error_at,
+            "last_proxy_check_at": account.last_proxy_check_at,
+            "last_connect_at": account.last_connect_at,
+            "last_seen_online_at": account.last_seen_online_at,
+            "proxy_last_rtt_ms": account.proxy_last_rtt_ms,
+            "warmup_level": account.warmup_level or 0,
+            "session_source": account.session_source or "",
+            "needs_reauth": needs_reauth,
+        },
+    }
+
+
 def _serialize_health(account: Account) -> dict:
     return {
         "account_id": account.id,
@@ -350,14 +446,92 @@ def _find_source_campaign(db, account_id: int, username: Optional[str]) -> Optio
     """Find campaign that sent a message to this username from this account."""
     if not username:
         return None
-    target = db.query(CampaignTarget).join(
-        Campaign, CampaignTarget.campaign_id == Campaign.id
-    ).filter(
-        Campaign.account_id == account_id,
-        CampaignTarget.username == username,
+    normalized = username.strip().lstrip("@")
+    target = db.query(CampaignTarget).filter(
+        CampaignTarget.account_id == account_id,
+        CampaignTarget.username == normalized,
         CampaignTarget.status == "sent",
     ).order_by(CampaignTarget.sent_at.desc()).first()
     return target.campaign_id if target else None
+
+
+async def _emit_runtime_note(event: str, **payload):
+    logger.info("%s: %s", event, payload)
+    if _ws_broadcast:
+        await _ws_broadcast({"event": event, **payload})
+
+
+async def _broadcast_conversation_message(conv: Conversation, text: str, *, paused_for_review: bool = False):
+    if not _ws_broadcast:
+        return
+    payload = {
+        "event": "new_message",
+        "conversation_id": conv.id,
+        "account_id": conv.account_id,
+        "text": text,
+        "unread_count": conv.unread_count or 0,
+        "is_hot": bool(conv.is_hot),
+    }
+    if paused_for_review:
+        payload["paused_for_review"] = True
+    await _ws_broadcast(payload)
+
+
+def _ensure_outreach_conversation(
+    db,
+    *,
+    account_id: int,
+    tg_user_id: str,
+    tg_username: Optional[str] = None,
+    tg_first_name: Optional[str] = None,
+    tg_last_name: Optional[str] = None,
+    source_campaign_id: Optional[int] = None,
+) -> Conversation:
+    conv = db.query(Conversation).filter(
+        Conversation.account_id == account_id,
+        Conversation.tg_user_id == tg_user_id,
+    ).first()
+    if not conv:
+        conv = Conversation(
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            tg_username=tg_username or "",
+            tg_first_name=tg_first_name or "",
+            tg_last_name=tg_last_name or "",
+            source_campaign_id=source_campaign_id,
+            unread_count=0,
+        )
+        db.add(conv)
+        db.flush()
+        return conv
+
+    if tg_username and not conv.tg_username:
+        conv.tg_username = tg_username
+    if tg_first_name and not conv.tg_first_name:
+        conv.tg_first_name = tg_first_name
+    if tg_last_name and not conv.tg_last_name:
+        conv.tg_last_name = tg_last_name
+    if source_campaign_id and not conv.source_campaign_id:
+        conv.source_campaign_id = source_campaign_id
+    return conv
+
+
+def _record_outreach_message(
+    db,
+    *,
+    conversation: Conversation,
+    role: str,
+    text: str,
+    increment_unread: bool = False,
+) -> Message:
+    if increment_unread:
+        conversation.unread_count = (conversation.unread_count or 0) + 1
+    message = Message(conversation_id=conversation.id, role=role, text=text)
+    db.add(message)
+    db.flush()
+    conversation.last_message = text
+    conversation.last_message_at = _utcnow()
+    return message
 
 
 async def _handle_message(account_id: int, event):
@@ -371,17 +545,7 @@ async def _handle_message(account_id: int, event):
     try:
         settings = db.query(Settings).filter(Settings.id == 1).first()
         account = db.query(Account).filter(Account.id == account_id).first()
-
-        if not account or not account.auto_reply:
-            return
-        if not settings or not settings.auto_reply_enabled:
-            return
-        provider = getattr(settings, "provider", "openai") or "openai"
-        openai_key = decrypt_value(settings.openai_key)
-        anthropic_key = decrypt_value(getattr(settings, "anthropic_key", ""))
-        if provider in ("openai", "openrouter") and not openai_key:
-            return
-        if provider == "anthropic" and not anthropic_key:
+        if not account:
             return
 
         tg_user_id = str(sender.id)
@@ -399,24 +563,24 @@ async def _handle_message(account_id: int, event):
             Conversation.tg_user_id == tg_user_id
         ).first()
 
-        is_new_conv = conv is None
-        if is_new_conv:
-            conv = Conversation(
-                account_id=account_id,
-                tg_user_id=tg_user_id,
-                tg_username=username or "",
-                tg_first_name=sender.first_name or "",
-                tg_last_name=sender.last_name or "",
-                unread_count=0,
-            )
-            db.add(conv)
-            db.flush()
+        source_campaign_id = conv.source_campaign_id if conv else None
+        if not source_campaign_id and username:
+            source_campaign_id = _find_source_campaign(db, account_id, username)
 
-        # ── Link to source campaign (first time we see this person) ──
-        if not conv.source_campaign_id and username:
-            campaign_id = _find_source_campaign(db, account_id, username)
-            if campaign_id:
-                conv.source_campaign_id = campaign_id
+        # Inbox stores outreach conversations only.
+        if conv is None and not source_campaign_id:
+            logger.info("Ignoring non-outreach incoming chat for account %s from %s", account_id, tg_user_id)
+            return
+
+        conv = _ensure_outreach_conversation(
+            db,
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            tg_username=username,
+            tg_first_name=sender.first_name or "",
+            tg_last_name=sender.last_name or "",
+            source_campaign_id=source_campaign_id,
+        )
 
         # Load source campaign for stop conditions
         source_campaign = None
@@ -425,13 +589,8 @@ async def _handle_message(account_id: int, event):
                 Campaign.id == conv.source_campaign_id
             ).first()
 
-        # ── Increment unread ──
-        conv.unread_count = (conv.unread_count or 0) + 1
-
         # ── Save incoming message ──
-        msg = Message(conversation_id=conv.id, role="user", text=text)
-        db.add(msg)
-        db.flush()
+        _record_outreach_message(db, conversation=conv, role="user", text=text, increment_unread=True)
 
         # ── Check stop keywords ──
         if source_campaign and source_campaign.stop_keywords:
@@ -439,17 +598,8 @@ async def _handle_message(account_id: int, event):
             if any(kw in text.lower() for kw in kws):
                 conv.status = "done"
                 _add_to_dnc(db, username, tg_user_id, f"stop keyword in campaign {source_campaign.id}")
-                conv.last_message = text
-                conv.last_message_at = datetime.utcnow()
                 db.commit()
-                if _ws_broadcast:
-                    await _ws_broadcast({
-                        "event": "new_message",
-                        "conversation_id": conv.id,
-                        "account_id": account_id,
-                        "text": text,
-                        "unread_count": conv.unread_count,
-                    })
+                await _broadcast_conversation_message(conv, text)
                 return
 
         # ── Check hot keywords ──
@@ -468,34 +618,14 @@ async def _handle_message(account_id: int, event):
         # ── Stop on reply (hand off to inbox) ──
         if source_campaign and source_campaign.stop_on_reply and conv.status == "active":
             conv.status = "paused"
-            conv.last_message = text
-            conv.last_message_at = datetime.utcnow()
             db.commit()
-            if _ws_broadcast:
-                await _ws_broadcast({
-                    "event": "new_message",
-                    "conversation_id": conv.id,
-                    "account_id": account_id,
-                    "text": text,
-                    "unread_count": conv.unread_count,
-                    "is_hot": bool(conv.is_hot),
-                    "paused_for_review": True,
-                })
+            await _broadcast_conversation_message(conv, text, paused_for_review=True)
             return
 
         # ── Conversation paused → record but don't reply ──
         if conv.status == "paused":
-            conv.last_message = text
-            conv.last_message_at = datetime.utcnow()
             db.commit()
-            if _ws_broadcast:
-                await _ws_broadcast({
-                    "event": "new_message",
-                    "conversation_id": conv.id,
-                    "account_id": account_id,
-                    "text": text,
-                    "unread_count": conv.unread_count,
-                })
+            await _broadcast_conversation_message(conv, text)
             return
 
         # ── Max messages check ──
@@ -506,18 +636,29 @@ async def _handle_message(account_id: int, event):
             ).count()
             if assistant_count >= source_campaign.max_messages:
                 conv.status = "paused"
-                conv.last_message = text
-                conv.last_message_at = datetime.utcnow()
                 db.commit()
-                if _ws_broadcast:
-                    await _ws_broadcast({
-                        "event": "new_message",
-                        "conversation_id": conv.id,
-                        "account_id": account_id,
-                        "text": text,
-                        "unread_count": conv.unread_count,
-                    })
+                await _broadcast_conversation_message(conv, text)
                 return
+
+        db.commit()
+        await _broadcast_conversation_message(conv, text)
+
+        provider = getattr(settings, "provider", "openai") or "openai" if settings else "openai"
+        openai_key = decrypt_value(settings.openai_key) if settings else ""
+        anthropic_key = decrypt_value(getattr(settings, "anthropic_key", "")) if settings else ""
+
+        if not account.auto_reply:
+            await _emit_runtime_note("auto_reply_skipped", account_id=account_id, conversation_id=conv.id, reason="AI отключен для аккаунта")
+            return
+        if not settings or not settings.auto_reply_enabled:
+            await _emit_runtime_note("auto_reply_skipped", account_id=account_id, conversation_id=conv.id, reason="AI отключен в настройках")
+            return
+        if provider in ("openai", "openrouter") and not openai_key:
+            await _emit_runtime_note("auto_reply_skipped", account_id=account_id, conversation_id=conv.id, reason="OpenAI key не настроен")
+            return
+        if provider == "anthropic" and not anthropic_key:
+            await _emit_runtime_note("auto_reply_skipped", account_id=account_id, conversation_id=conv.id, reason="Anthropic key не настроен")
+            return
 
         # ── Load history and resolve prompt ──
         history = db.query(Message).filter(
@@ -541,8 +682,6 @@ async def _handle_message(account_id: int, event):
 
         system_prompt = _resolve_prompt(settings, account, source_campaign)
 
-        db.commit()
-
         from backend.gpt_handler import generate_reply
         reply = await generate_reply(
             provider=getattr(settings, "provider", "openai") or "openai",
@@ -555,25 +694,16 @@ async def _handle_message(account_id: int, event):
         )
 
         if reply:
-            client = _clients.get(account_id)
-            if client:
-                await client.send_message(sender.id, reply)
-            db.refresh(conv)
-            reply_msg = Message(conversation_id=conv.id, role="assistant", text=reply)
-            db.add(reply_msg)
-            conv.last_message = reply
-            conv.last_message_at = datetime.utcnow()
-            db.commit()
-
-            if _ws_broadcast:
-                await _ws_broadcast({
-                    "event": "new_message",
-                    "conversation_id": conv.id,
-                    "account_id": account_id,
-                    "text": reply,
-                    "unread_count": conv.unread_count,
-                    "is_hot": bool(conv.is_hot),
-                })
+            send_result = await send_manual_message(account_id, tg_user_id, conv.id, reply)
+            if not send_result.get("ok"):
+                await _emit_runtime_note(
+                    "auto_reply_skipped",
+                    account_id=account_id,
+                    conversation_id=conv.id,
+                    reason=send_result.get("error") or "Не удалось отправить AI-ответ",
+                )
+        else:
+            await _emit_runtime_note("auto_reply_skipped", account_id=account_id, conversation_id=conv.id, reason="AI не вернул ответ")
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)
     finally:
@@ -693,28 +823,26 @@ def get_account_health(account_id: int) -> dict:
 
 
 async def clear_quarantine(account_id: int) -> dict:
-    """Manually clear quarantine and reconnect the account."""
-    health = _persist_account_health(
-        account_id,
-        quarantine_until=None,
-        connection_state="offline",
-        last_error_code=None,
-        last_error_message=None,
-    )
-    if _ws_broadcast:
-        asyncio.create_task(_ws_broadcast({"event": "account_health", "account_id": account_id, "health": health}))
+    """Backward-compatible alias for the unified runtime reset flow."""
+    return await reset_account_runtime(account_id, requested_by="clear-quarantine")
+
+
+async def reset_account_runtime(account_id: int, requested_by: str = "reset") -> dict:
     db = SessionLocal()
     try:
         acc = db.query(Account).filter(Account.id == account_id).first()
-        if acc:
-            acc.is_active = True
-            db.commit()
-            ok = await start_client(acc)
-            health = get_account_health(account_id)
-            return {"ok": ok, "health": health}
+        if not acc:
+            return {"ok": False, "error": "Account not found", "requested_by": requested_by}
+        _clear_legacy_quarantine_state(acc)
+        acc.is_active = True
+        acc.connection_state = "offline"
+        acc.last_error_code = None
+        acc.last_error_message = None
+        acc.last_error_at = None
+        db.commit()
     finally:
         db.close()
-    return {"ok": False, "error": "Account not found"}
+    return await reconnect_account_runtime(account_id, requested_by=requested_by)
 
 
 async def reconnect_account_runtime(account_id: int, requested_by: str = "system") -> dict:
@@ -723,8 +851,7 @@ async def reconnect_account_runtime(account_id: int, requested_by: str = "system
         acc = db.query(Account).filter(Account.id == account_id).first()
         if not acc:
             return {"ok": False, "error": "Account not found", "requested_by": requested_by}
-        if acc.quarantine_until:
-            acc.quarantine_until = None
+        if _clear_legacy_quarantine_state(acc):
             db.commit()
         _persist_account_health(
             account_id,
@@ -887,17 +1014,7 @@ async def _supervise_accounts():
         try:
             accounts = db.query(Account).all()
             for acc in accounts:
-                # Clear stale quarantine state (field + legacy string values from old code)
-                dirty = False
-                if acc.quarantine_until:
-                    acc.quarantine_until = None
-                    dirty = True
-                if acc.connection_state == "quarantined":
-                    acc.connection_state = "offline"
-                    dirty = True
-                if acc.eligibility_state == "blocked_quarantine":
-                    acc.eligibility_state = "ok"
-                    dirty = True
+                dirty = _clear_legacy_quarantine_state(acc)
                 # Clear resolution restriction so account can be retried next campaign
                 if acc.last_error_code == "USERNAME_RESOLUTION_RESTRICTED":
                     acc.last_error_code = None
@@ -995,6 +1112,8 @@ async def start_all_accounts():
     try:
         accounts = db.query(Account).all()
         for acc in accounts:
+            if _clear_legacy_quarantine_state(acc):
+                db.commit()
             has_session = acc.session_string or os.path.exists(_session_path(acc.id) + ".session")
             if has_session:
                 ok = await start_client(acc)
@@ -1024,6 +1143,52 @@ async def resume_running_campaigns(db=None):
             db.close()
 
 
+def _entity_profile(entity, fallback_username: Optional[str] = None, fallback_first_name: Optional[str] = None) -> dict:
+    return {
+        "tg_user_id": str(getattr(entity, "id", "") or ""),
+        "tg_username": getattr(entity, "username", None) or fallback_username or "",
+        "tg_first_name": getattr(entity, "first_name", None) or fallback_first_name or "",
+        "tg_last_name": getattr(entity, "last_name", None) or "",
+    }
+
+
+def _persist_outgoing_outreach_message(
+    *,
+    account_id: int,
+    text: str,
+    conversation_id: Optional[int] = None,
+    source_campaign_id: Optional[int] = None,
+    tg_user_id: Optional[str] = None,
+    tg_username: Optional[str] = None,
+    tg_first_name: Optional[str] = None,
+    tg_last_name: Optional[str] = None,
+) -> Optional[Conversation]:
+    db = SessionLocal()
+    try:
+        conv = None
+        if conversation_id is not None:
+            conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if conv is None:
+            if not tg_user_id:
+                logger.warning("Skipping conversation persistence for account %s: tg_user_id is missing", account_id)
+                return None
+            conv = _ensure_outreach_conversation(
+                db,
+                account_id=account_id,
+                tg_user_id=tg_user_id,
+                tg_username=tg_username,
+                tg_first_name=tg_first_name,
+                tg_last_name=tg_last_name,
+                source_campaign_id=source_campaign_id,
+            )
+        _record_outreach_message(db, conversation=conv, role="assistant", text=text)
+        db.commit()
+        db.refresh(conv)
+        return conv
+    finally:
+        db.close()
+
+
 async def send_manual_message(account_id: int, tg_user_id: str, conversation_id: int, text: str) -> dict:
     client = _clients.get(account_id)
     if not client:
@@ -1035,7 +1200,15 @@ async def send_manual_message(account_id: int, tg_user_id: str, conversation_id:
         return {"ok": False, "error": "Account is not connected"}
     await client.send_message(int(tg_user_id), text)
     _clear_error(account_id, connection_state="online", last_seen_online_at=_utcnow())
+    conv = _persist_outgoing_outreach_message(
+        account_id=account_id,
+        conversation_id=conversation_id,
+        tg_user_id=tg_user_id,
+        text=text,
+    )
     if _ws_broadcast:
+        if conv:
+            await _broadcast_conversation_message(conv, text)
         await _ws_broadcast(
             {
                 "event": "manual_message_sent",
@@ -1044,7 +1217,7 @@ async def send_manual_message(account_id: int, tg_user_id: str, conversation_id:
                 "text": text,
             }
         )
-    return {"ok": True}
+    return {"ok": True, "conversation_id": conv.id if conv else conversation_id}
 
 
 # ── Campaign worker ──────────────────────────────────────────────
@@ -1276,11 +1449,31 @@ async def _campaign_worker(campaign_id: int):
                 text = _apply_personalization(text, target)
 
                 try:
-                    await client.send_message(target.username, text)
+                    entity = await client.get_entity(target.username)
+                    sent_message = await client.send_message(entity, text)
                     target.status = "sent"
                     target.account_id = _account_id
                     target.sent_at = datetime.utcnow()
                     _clear_error(_account_id, connection_state="online", last_seen_online_at=_utcnow())
+                    profile = _entity_profile(
+                        entity,
+                        fallback_username=target.username,
+                        fallback_first_name=target.display_name,
+                    )
+                    if not profile["tg_user_id"]:
+                        peer_id = getattr(sent_message, "peer_id", None)
+                        profile["tg_user_id"] = str(getattr(peer_id, "user_id", "") or "")
+                    conv = _persist_outgoing_outreach_message(
+                        account_id=_account_id,
+                        source_campaign_id=campaign_id,
+                        tg_user_id=profile["tg_user_id"],
+                        tg_username=profile["tg_username"] or target.username,
+                        tg_first_name=profile["tg_first_name"] or target.display_name,
+                        tg_last_name=profile["tg_last_name"],
+                        text=text,
+                    )
+                    if conv:
+                        await _broadcast_conversation_message(conv, text)
                     logger.info(f"Campaign {campaign_id}: sent to {target.username}")
                 except FloodWaitError as e:
                     wait_secs = e.seconds + 30

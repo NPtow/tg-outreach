@@ -1,4 +1,3 @@
-from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -129,12 +128,6 @@ async def send_message(conv_id: int, data: SendMessageRequest, db: Session = Dep
         )
     if not result.get("ok"):
         raise HTTPException(400, result)
-
-    msg = Message(conversation_id=conv.id, role="assistant", text=data.text)
-    db.add(msg)
-    conv.last_message = data.text
-    conv.last_message_at = datetime.utcnow()
-    db.commit()
     return {"ok": True}
 
 

@@ -75,7 +75,6 @@ def _serialize_account(account: Account) -> dict:
         "app_id": account.app_id,
         "is_active": account.connection_state == "online",
         "auto_reply": account.auto_reply,
-        "needs_reauth": bool(getattr(account, "needs_reauth", False)),
         "tdata_stored": has_secret(account.tdata_blob),
         "prompt_template_id": account.prompt_template_id,
         "created_at": account.created_at,
@@ -83,19 +82,7 @@ def _serialize_account(account: Account) -> dict:
         "proxy_port": account.proxy_port,
         "proxy_type": account.proxy_type or "SOCKS5",
         "proxy_user": account.proxy_user or "",
-        "connection_state": account.connection_state or "offline",
-        "proxy_state": account.proxy_state or "unknown",
-        "session_state": account.session_state or "missing",
-        "eligibility_state": account.eligibility_state or "blocked_auth",
-        "last_error_code": account.last_error_code,
-        "last_error_message": account.last_error_message,
-        "last_error_at": account.last_error_at,
-        "last_proxy_check_at": account.last_proxy_check_at,
-        "last_connect_at": account.last_connect_at,
-        "last_seen_online_at": account.last_seen_online_at,
-        "warmup_level": account.warmup_level or 0,
-        "session_source": account.session_source or "",
-        "proxy_last_rtt_ms": account.proxy_last_rtt_ms,
+        "health": tg.build_public_account_health(account),
     }
 
 
@@ -298,26 +285,17 @@ async def clear_quarantine(account_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{account_id}/unblock")
 async def unblock_account(account_id: int, db: Session = Depends(get_db)):
-    """Reset account connection/eligibility state in DB without touching Telegram runtime."""
+    """Reset account runtime state through the owning telegram worker."""
     acc = db.query(Account).filter(Account.id == account_id).first()
     if not acc:
         raise HTTPException(404, "Account not found")
-    acc.quarantine_until = None
-    acc.is_active = True
-    acc.connection_state = "offline"
-    acc.eligibility_state = "ok"
-    acc.last_error_code = None
-    acc.last_error_message = None
-    acc.last_error_at = None
-    db.commit()
-    try:
-        if owns_telegram_runtime():
-            ok = await tg.start_client(acc)
-            return {"ok": bool(ok), "started": True}
-    except Exception as e:
-        logger.exception("unblock: start_client failed for %s", account_id)
-        return {"ok": True, "started": False, "error": str(e)}
-    return {"ok": True, "started": False}
+    if owns_telegram_runtime():
+        result = await tg.reset_account_runtime(account_id, requested_by="api-unblock")
+    else:
+        result = await _forward_or_fail("POST", f"/internal/runtime/accounts/{account_id}/unblock")
+    if not result.get("ok"):
+        raise HTTPException(400, result)
+    return result
 
 
 @router.post("/{account_id}/toggle-reply")

@@ -1,0 +1,276 @@
+import asyncio
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from backend.database import get_db, Base
+from backend.models import Account, Conversation, Message, Settings
+from backend.routers import accounts as accounts_router
+import backend.telegram_client as tg
+
+
+class FakeEvent:
+    def __init__(self, *, sender, text, is_out=False):
+        self._sender = sender
+        self.is_out = is_out
+        self.message = SimpleNamespace(text=text)
+
+    async def get_sender(self):
+        return self._sender
+
+
+class OutreachRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tempdir.name) / "test.db"
+        self.engine = create_engine(
+            f"sqlite:///{self.db_path}",
+            connect_args={"check_same_thread": False},
+        )
+        self.Session = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        Base.metadata.create_all(self.engine)
+
+    def tearDown(self):
+        self.engine.dispose()
+        self.tempdir.cleanup()
+
+    def _db(self):
+        return self.Session()
+
+    def test_serialize_account_returns_simplified_public_health(self):
+        account = Account(
+            id=14,
+            name="Ana",
+            phone="+573122997092",
+            app_id="2040",
+            app_hash="hash",
+            auto_reply=True,
+        )
+        account.connection_state = "online"
+        account.proxy_state = "ok"
+        account.session_state = "valid"
+        account.eligibility_state = "eligible"
+
+        payload = accounts_router._serialize_account(account)
+
+        self.assertIn("health", payload)
+        self.assertEqual(payload["health"]["status"], "working")
+        self.assertTrue(payload["health"]["is_online"])
+        self.assertTrue(payload["health"]["can_receive"])
+        self.assertTrue(payload["health"]["can_auto_reply"])
+        self.assertTrue(payload["health"]["can_start_outreach"])
+        self.assertIn("debug", payload["health"])
+        self.assertEqual(payload["health"]["debug"]["connection_state"], "online")
+        self.assertNotIn("connection_state", payload)
+        self.assertNotIn("eligibility_state", payload)
+
+    def test_unblock_forwards_to_worker_when_runtime_is_split(self):
+        with self._db() as db:
+            db.add(Account(name="Ana", phone="+1", app_id="2040", app_hash="hash"))
+            db.commit()
+
+        app = FastAPI()
+        app.include_router(accounts_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            with patch("backend.routers.accounts.owns_telegram_runtime", return_value=False):
+                with patch(
+                    "backend.routers.accounts._forward_or_fail",
+                    AsyncMock(return_value={"ok": True, "started": True}),
+                ) as mocked:
+                    response = client.post("/api/accounts/1/unblock")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"ok": True, "started": True})
+            mocked.assert_awaited_once_with("POST", "/internal/runtime/accounts/1/unblock")
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+    def test_handle_message_persists_incoming_even_when_auto_reply_is_disabled(self):
+        with self._db() as db:
+            db.add(
+                Account(
+                    id=1,
+                    name="Ana",
+                    phone="+573122997092",
+                    app_id="2040",
+                    app_hash="hash",
+                    auto_reply=True,
+                )
+            )
+            db.add(Settings(id=1, provider="openai", auto_reply_enabled=False, model="gpt-4o-mini"))
+            db.add(
+                Conversation(
+                    id=10,
+                    account_id=1,
+                    tg_user_id="42",
+                    tg_username="lead_user",
+                    tg_first_name="Lead",
+                    status="active",
+                )
+            )
+            db.commit()
+
+        sender = SimpleNamespace(
+            id=42,
+            bot=False,
+            username="lead_user",
+            first_name="Lead",
+            last_name="User",
+        )
+        event = FakeEvent(sender=sender, text="Привет, это ответ")
+
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch("backend.telegram_client._ws_broadcast", None):
+                asyncio.run(tg._handle_message(1, event))
+
+        with self._db() as db:
+            messages = (
+                db.query(Message)
+                .filter(Message.conversation_id == 10)
+                .order_by(Message.id.asc())
+                .all()
+            )
+            conv = db.query(Conversation).filter(Conversation.id == 10).first()
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].role, "user")
+        self.assertEqual(messages[0].text, "Привет, это ответ")
+        self.assertEqual(conv.last_message, "Привет, это ответ")
+        self.assertEqual(conv.unread_count, 1)
+
+    def test_handle_message_persists_incoming_even_without_provider_key(self):
+        with self._db() as db:
+            db.add(
+                Account(
+                    id=2,
+                    name="Ana",
+                    phone="+573122997093",
+                    app_id="2040",
+                    app_hash="hash",
+                    auto_reply=True,
+                )
+            )
+            db.add(Settings(id=1, provider="openai", auto_reply_enabled=True, openai_key="", model="gpt-4o-mini"))
+            db.add(
+                Conversation(
+                    id=11,
+                    account_id=2,
+                    tg_user_id="43",
+                    tg_username="lead_user_2",
+                    tg_first_name="Lead",
+                    status="active",
+                )
+            )
+            db.commit()
+
+        sender = SimpleNamespace(
+            id=43,
+            bot=False,
+            username="lead_user_2",
+            first_name="Lead",
+            last_name="User",
+        )
+        event = FakeEvent(sender=sender, text="У меня есть вопрос")
+
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch("backend.telegram_client._ws_broadcast", None):
+                asyncio.run(tg._handle_message(2, event))
+
+        with self._db() as db:
+            messages = (
+                db.query(Message)
+                .filter(Message.conversation_id == 11)
+                .order_by(Message.id.asc())
+                .all()
+            )
+            conv = db.query(Conversation).filter(Conversation.id == 11).first()
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].role, "user")
+        self.assertEqual(messages[0].text, "У меня есть вопрос")
+        self.assertEqual(conv.last_message, "У меня есть вопрос")
+        self.assertEqual(conv.unread_count, 1)
+
+    def test_outgoing_outreach_message_creates_conversation_immediately(self):
+        with self._db() as db:
+            db.add(Account(id=3, name="Ana", phone="+573122997094", app_id="2040", app_hash="hash"))
+            db.commit()
+
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            conv = tg._persist_outgoing_outreach_message(
+                account_id=3,
+                source_campaign_id=77,
+                tg_user_id="44",
+                tg_username="lead_user_3",
+                tg_first_name="Lead",
+                text="Привет! Это первое сообщение",
+            )
+
+        self.assertIsNotNone(conv)
+        self.assertEqual(conv.source_campaign_id, 77)
+
+        with self._db() as db:
+            stored_conv = db.query(Conversation).filter(Conversation.account_id == 3, Conversation.tg_user_id == "44").first()
+            messages = db.query(Message).filter(Message.conversation_id == stored_conv.id).all()
+
+        self.assertIsNotNone(stored_conv)
+        self.assertEqual(stored_conv.last_message, "Привет! Это первое сообщение")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].role, "assistant")
+
+    def test_handle_message_ignores_non_outreach_chat_without_existing_conversation(self):
+        with self._db() as db:
+            db.add(
+                Account(
+                    id=4,
+                    name="Ana",
+                    phone="+573122997095",
+                    app_id="2040",
+                    app_hash="hash",
+                    auto_reply=True,
+                )
+            )
+            db.add(Settings(id=1, provider="openai", auto_reply_enabled=True, openai_key="", model="gpt-4o-mini"))
+            db.commit()
+
+        sender = SimpleNamespace(
+            id=45,
+            bot=False,
+            username="stranger_user",
+            first_name="Stranger",
+            last_name="User",
+        )
+        event = FakeEvent(sender=sender, text="Это не outreach чат")
+
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch("backend.telegram_client._ws_broadcast", None):
+                asyncio.run(tg._handle_message(4, event))
+
+        with self._db() as db:
+            conversations = db.query(Conversation).filter(Conversation.account_id == 4).count()
+            messages = db.query(Message).count()
+
+        self.assertEqual(conversations, 0)
+        self.assertEqual(messages, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

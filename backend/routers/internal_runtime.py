@@ -51,6 +51,11 @@ async def clear_quarantine(account_id: int):
     return await tg.clear_quarantine(account_id)
 
 
+@router.post("/accounts/{account_id}/unblock", dependencies=[Depends(require_worker_token)])
+async def unblock(account_id: int):
+    return await tg.reset_account_runtime(account_id, requested_by="internal-unblock")
+
+
 @router.post("/accounts/{account_id}/save-session", dependencies=[Depends(require_worker_token)])
 async def save_session(account_id: int):
     ok = await tg.save_session_now(account_id)
