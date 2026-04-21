@@ -1289,12 +1289,9 @@ async def _campaign_worker(campaign_id: int):
                     # public_exists=True → confirmed resolution issue; public_exists=None → check failed,
                     # treat conservatively (don't permanently fail — try another account or pause)
                     if public_exists or (public_exists is None and isinstance(e, (UsernameNotOccupiedError, UsernameInvalidError))):
-                        target.error = (
-                            f"Public username @{target.username} exists, but account {_account_id} "
-                            "cannot resolve it via Telegram API"
-                        )
                         _mark_username_resolution_restricted(_account_id, target.username)
 
+                        # Check if any other account in campaign can still resolve
                         still_eligible = False
                         db.expire_all()
                         for aid in acc_ids:
@@ -1304,16 +1301,28 @@ async def _campaign_worker(campaign_id: int):
                             if candidate and _compute_eligibility(candidate) == "eligible":
                                 still_eligible = True
                                 break
-                        if not still_eligible:
-                            campaign.status = "paused"
-                        logger.warning(
-                            "Campaign %s: account %s cannot resolve public username %s",
-                            campaign_id,
-                            _account_id,
-                            target.username,
-                        )
-                        db.commit()
-                        continue
+
+                        if still_eligible:
+                            # Another account may be able to send — retry on next iteration
+                            logger.warning(
+                                "Campaign %s: account %s cannot resolve @%s, will retry with another account",
+                                campaign_id, _account_id, target.username,
+                            )
+                            db.commit()
+                            continue
+                        else:
+                            # No accounts can resolve this username — mark target failed and move on
+                            target.status = "failed"
+                            target.error = (
+                                f"@{target.username} cannot be resolved by any available account "
+                                "(likely DC routing restriction)"
+                            )
+                            logger.warning(
+                                "Campaign %s: no accounts can resolve @%s — marking failed",
+                                campaign_id, target.username,
+                            )
+                            db.commit()
+                            continue
 
                     target.status = "failed"
                     target.error = str(e)
