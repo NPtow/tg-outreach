@@ -1102,11 +1102,24 @@ def is_running(account_id: int) -> bool:
     return account_id in _clients
 
 
-async def login_new_account(account: Account, phone_code: str, code: str, password: str = "") -> dict:
+async def login_new_account(account: Account, phone_code: str, code: str, password: str = "", partial_session: Optional[str] = None) -> dict:
     try:
-        client = _make_client(account)
+        if partial_session:
+            # Use the session from send_code_request — same auth key, Telegram accepts the code
+            proxy = _build_proxy(account)
+            app_hash = decrypt_value(account.app_hash) or account.app_hash
+            client = TelegramClient(
+                StringSession(partial_session), int(account.app_id), app_hash, proxy=proxy,
+                device_model=getattr(account, "device_model", None) or "Desktop",
+                system_version=getattr(account, "system_version", None) or "Windows 10",
+                app_version=getattr(account, "app_version", None) or "6.7.5 x64",
+                lang_code=getattr(account, "lang_code", None) or "ru",
+                system_lang_code="ru-RU",
+            )
+        else:
+            client = _make_fresh_client(account)
     except (ValueError, Exception) as e:
-        return {"ok": False, "error": f"Invalid session: {e}"}
+        return {"ok": False, "error": f"Failed to create client: {e}"}
     try:
         await client.connect()
         await client.sign_in(account.phone, code, phone_code_hash=phone_code)
@@ -1147,16 +1160,30 @@ async def login_new_account(account: Account, phone_code: str, code: str, passwo
         return {"ok": False, "error": str(e)}
 
 
+def _make_fresh_client(account: Account) -> TelegramClient:
+    """Create a client with a blank session — used for re-auth flows where the old session may be dead."""
+    proxy = _build_proxy(account)
+    app_hash = decrypt_value(account.app_hash) or account.app_hash
+    return TelegramClient(
+        StringSession(), int(account.app_id), app_hash, proxy=proxy,
+        device_model=getattr(account, "device_model", None) or "Desktop",
+        system_version=getattr(account, "system_version", None) or "Windows 10",
+        app_version=getattr(account, "app_version", None) or "6.7.5 x64",
+        lang_code=getattr(account, "lang_code", None) or "ru",
+        system_lang_code="ru-RU",
+    )
+
+
 async def send_code_request(account: Account) -> dict:
-    try:
-        client = _make_client(account)
-    except (ValueError, Exception) as e:
-        return {"ok": False, "error": f"Invalid session: {e}"}
+    # Always use a fresh session for send-code — the existing session may be dead/duplicated
+    client = _make_fresh_client(account)
     try:
         await client.connect()
         result = await client.send_code_request(account.phone)
+        # Save the partial session so verify_code can reuse the same auth key
+        partial_session = client.session.save()
         await client.disconnect()
-        return {"ok": True, "phone_code_hash": result.phone_code_hash}
+        return {"ok": True, "phone_code_hash": result.phone_code_hash, "partial_session": partial_session}
     except Exception as e:
         await client.disconnect()
         return {"ok": False, "error": str(e)}

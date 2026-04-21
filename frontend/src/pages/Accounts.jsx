@@ -104,6 +104,7 @@ function AddAccountModal({ onClose, onAdded }) {
   const [proxies, setProxies] = useState([]);
   const [accountId, setAccountId] = useState(null);
   const [phoneCodeHash, setPhoneCodeHash] = useState("");
+  const [partialSession, setPartialSession] = useState("");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -128,8 +129,11 @@ function AddAccountModal({ onClose, onAdded }) {
       const acc = await api.createAccount(payload);
       setAccountId(acc.id);
       const result = await api.sendCode(acc.id);
-      if (result.ok) { setPhoneCodeHash(result.phone_code_hash); setStep(STEPS.CODE); }
-      else setError(result.error || "Ошибка отправки кода");
+      if (result.ok) {
+        setPhoneCodeHash(result.phone_code_hash);
+        setPartialSession(result.partial_session || "");
+        setStep(STEPS.CODE);
+      } else setError(result.error || "Ошибка отправки кода");
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };
@@ -137,7 +141,7 @@ function AddAccountModal({ onClose, onAdded }) {
   const handleVerify = async () => {
     setError(""); setLoading(true);
     try {
-      const result = await api.verifyCode({ account_id: accountId, phone_code_hash: phoneCodeHash, code, password });
+      const result = await api.verifyCode({ account_id: accountId, phone_code_hash: phoneCodeHash, code, password, partial_session: partialSession || undefined });
       if (result.ok) { setStep(STEPS.DONE); onAdded(); }
       else setError(result.error || "Неверный код");
     } catch (e) { setError(e.message); }
@@ -295,6 +299,7 @@ function ImportTdataModal({ onClose, onAdded }) {
 
 function ReauthModal({ account, onClose, onDone }) {
   const [phoneCodeHash, setPhoneCodeHash] = useState("");
+  const [partialSession, setPartialSession] = useState("");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -304,8 +309,10 @@ function ReauthModal({ account, onClose, onDone }) {
     setError(""); setLoading(true);
     try {
       const result = await api.sendCode(account.id);
-      if (result.ok) setPhoneCodeHash(result.phone_code_hash);
-      else setError(result.error || "Ошибка отправки кода");
+      if (result.ok) {
+        setPhoneCodeHash(result.phone_code_hash);
+        setPartialSession(result.partial_session || "");
+      } else setError(result.error || "Ошибка отправки кода");
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };
@@ -313,7 +320,7 @@ function ReauthModal({ account, onClose, onDone }) {
   const handleVerify = async () => {
     setError(""); setLoading(true);
     try {
-      const result = await api.verifyCode({ account_id: account.id, phone_code_hash: phoneCodeHash, code, password });
+      const result = await api.verifyCode({ account_id: account.id, phone_code_hash: phoneCodeHash, code, password, partial_session: partialSession || undefined });
       if (result.ok) onDone();
       else setError(result.error || "Неверный код");
     } catch (e) { setError(e.message); }

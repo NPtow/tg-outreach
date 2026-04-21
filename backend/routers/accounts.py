@@ -57,6 +57,7 @@ class VerifyCodeRequest(BaseModel):
     phone_code_hash: str
     code: str
     password: str = ""
+    partial_session: Optional[str] = None
 
 
 class SetPromptRequest(BaseModel):
@@ -184,7 +185,7 @@ async def verify_code(data: VerifyCodeRequest, db: Session = Depends(get_db)):
     acc = db.query(Account).filter(Account.id == data.account_id).first()
     if not acc:
         raise HTTPException(404, "Account not found")
-    result = await tg.login_new_account(acc, data.phone_code_hash, data.code, data.password)
+    result = await tg.login_new_account(acc, data.phone_code_hash, data.code, data.password, partial_session=data.partial_session)
     if result["ok"]:
         if owns_telegram_runtime():
             reconnect_result = await tg.reconnect_account_runtime(acc.id, requested_by="verify-code")
