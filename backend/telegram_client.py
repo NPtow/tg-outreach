@@ -937,7 +937,12 @@ async def start_client(account: Account, _tdata_retried: bool = False) -> bool:
         return True
 
     _persist_account_runtime_state(account.id, connection_state="connecting", session_state=_derive_session_state(account))
-    client = _make_client(account)
+    try:
+        client = _make_client(account)
+    except (ValueError, Exception) as e:
+        logger.error(f"Account {account.id}: invalid session / config — {e}")
+        _mark_error(account.id, "INVALID_SESSION", str(e), session_state="expired", connection_state="offline")
+        return False
     try:
         try:
             await asyncio.wait_for(client.connect(), timeout=30)
@@ -1082,7 +1087,10 @@ def is_running(account_id: int) -> bool:
 
 
 async def login_new_account(account: Account, phone_code: str, code: str, password: str = "") -> dict:
-    client = _make_client(account)
+    try:
+        client = _make_client(account)
+    except (ValueError, Exception) as e:
+        return {"ok": False, "error": f"Invalid session: {e}"}
     try:
         await client.connect()
         await client.sign_in(account.phone, code, phone_code_hash=phone_code)
@@ -1124,7 +1132,10 @@ async def login_new_account(account: Account, phone_code: str, code: str, passwo
 
 
 async def send_code_request(account: Account) -> dict:
-    client = _make_client(account)
+    try:
+        client = _make_client(account)
+    except (ValueError, Exception) as e:
+        return {"ok": False, "error": f"Invalid session: {e}"}
     try:
         await client.connect()
         result = await client.send_code_request(account.phone)
