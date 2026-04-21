@@ -227,6 +227,57 @@ async def verify_code(data: VerifyCodeRequest, db: Session = Depends(get_db)):
     return result
 
 
+class ImportSessionRequest(BaseModel):
+    name: str
+    phone: str
+    session_string: str
+    app_id: str = "2040"
+    app_hash: str = "b18441a1ff607e10a989891a5462e627"
+    proxy_host: str = ""
+    proxy_port: Optional[int] = None
+    proxy_type: str = "SOCKS5"
+    proxy_user: str = ""
+    proxy_pass: str = ""
+
+
+@router.post("/import-session")
+async def import_session(data: ImportSessionRequest, db: Session = Depends(get_db)):
+    """Import an existing Telethon StringSession directly."""
+    existing = db.query(Account).filter(Account.phone == data.phone).first()
+    if existing:
+        raise HTTPException(400, "Account with this phone already exists")
+
+    acc = Account(
+        name=data.name,
+        phone=data.phone,
+        app_id=data.app_id,
+        app_hash=encrypt_value(data.app_hash),
+        proxy_host=data.proxy_host or None,
+        proxy_port=data.proxy_port or None,
+        proxy_type=(data.proxy_type or "SOCKS5").upper(),
+        proxy_user=data.proxy_user or None,
+        proxy_pass=encrypt_value(data.proxy_pass) if data.proxy_pass else None,
+        session_source="string_session",
+        session_string=encrypt_value(data.session_string),
+    )
+    db.add(acc)
+    db.flush()
+    params = _generate_device_params(acc.id)
+    acc.device_model = params["device_model"]
+    acc.system_version = params["system_version"]
+    acc.app_version = params["app_version"]
+    acc.lang_code = params["lang_code"]
+    db.commit()
+    db.refresh(acc)
+
+    if owns_telegram_runtime():
+        runtime_result = await tg.reconnect_account_runtime(acc.id, requested_by="import-session")
+    else:
+        runtime_result = await _forward_or_fail("POST", f"/internal/runtime/accounts/{acc.id}/reconnect")
+
+    return {"id": acc.id, "name": acc.name, "phone": acc.phone, "ok": True, "runtime": runtime_result}
+
+
 @router.post("/{account_id}/proxy-test")
 async def proxy_test(account_id: int, db: Session = Depends(get_db)):
     acc = db.query(Account).filter(Account.id == account_id).first()
