@@ -63,6 +63,10 @@ class SetPromptRequest(BaseModel):
     prompt_template_id: Optional[int]
 
 
+class SetSessionRequest(BaseModel):
+    session_string: str
+
+
 def _serialize_account(account: Account) -> dict:
     return {
         "id": account.id,
@@ -261,6 +265,23 @@ async def reconnect_account(account_id: int, db: Session = Depends(get_db)):
     if not result.get("ok"):
         raise HTTPException(400, result)
     return result
+
+
+@router.post("/{account_id}/set-session")
+async def set_session(account_id: int, data: SetSessionRequest, db: Session = Depends(get_db)):
+    """Upload a session string to an existing account and reconnect."""
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    acc.session_string = encrypt_value(data.session_string)
+    acc.session_source = "session_string"
+    acc.needs_reauth = False
+    db.commit()
+    if owns_telegram_runtime():
+        result = await tg.reconnect_account_runtime(account_id, requested_by="set-session")
+    else:
+        result = await _forward_or_fail("POST", f"/internal/runtime/accounts/{account_id}/reconnect")
+    return {"ok": True, "runtime": result}
 
 
 @router.post("/{account_id}/clear-quarantine")
