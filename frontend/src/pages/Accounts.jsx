@@ -133,7 +133,12 @@ function AddAccountModal({ onClose, onAdded }) {
         setPhoneCodeHash(result.phone_code_hash);
         setPartialSession(result.partial_session || "");
         setStep(STEPS.CODE);
-      } else setError(result.error || "Ошибка отправки кода");
+      } else {
+        // Clean up zombie account so user can retry with the same phone
+        try { await api.deleteAccount(acc.id); } catch (_) {}
+        setAccountId(null);
+        setError(result.error || "Ошибка отправки кода");
+      }
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };

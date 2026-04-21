@@ -1180,8 +1180,14 @@ async def send_code_request(account: Account) -> dict:
     try:
         await client.connect()
         result = await client.send_code_request(account.phone)
-        # Save the partial session so verify_code can reuse the same auth key
-        partial_session = client.session.save()
+        # Telethon can store server_address as int (IPv4 integer) after connect —
+        # StringSession.save() requires str/bytes, so we coerce it here.
+        sess = client.session
+        if (hasattr(sess, "_server_address")
+                and sess._server_address is not None
+                and not isinstance(sess._server_address, (str, bytes, bytearray))):
+            sess._server_address = str(sess._server_address)
+        partial_session = sess.save()
         await client.disconnect()
         return {"ok": True, "phone_code_hash": result.phone_code_hash, "partial_session": partial_session}
     except Exception as e:

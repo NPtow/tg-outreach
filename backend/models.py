@@ -63,7 +63,7 @@ class Account(Base):
     connection_state = Column(String(30), default="offline")
     proxy_state = Column(String(30), default="unknown")
     session_state = Column(String(30), default="missing")
-    eligibility_state = Column(String(30), default="blocked_auth")
+    eligibility_state = Column(String(30), default="blocked_runtime")
     last_error_code = Column(String(50), nullable=True)
     last_error_message = Column(Text, nullable=True)
     last_error_at = Column(DateTime, nullable=True)
