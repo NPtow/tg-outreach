@@ -1,25 +1,49 @@
-# TG Outreach Minimal Accounts Status
+# Railway Deployment Status
 
 ## Current Phase
-- In progress: final validation, commit, push, deploy.
+M1 — Commit & Push (не начато)
 
 ## Done
-- Account public payload flattened to simple status fields.
-- Nested diagnostic account payload removed from Accounts API/UI.
-- `/api/accounts/{id}/health` removed.
-- Warming backend router removed.
-- Warming worker removed.
-- Warming frontend page, navigation, and API client methods removed.
-- Warming ORM models and bootstrap columns removed.
-- Campaign account picker now uses direct `account.can_receive`.
+- [x] Фикс зависания worker: `asyncio.wait_for(client.connect(), timeout=30)` в telegram_client.py
+- [x] Фикс Python 3.9 compat: `Optional[Dict[str, Any]]` в worker_client.py
+- [x] Фикс авто-ответа: `getattr(event, "is_out", None)` в telegram_client.py
+- [x] Удалена секция "Промпт" из Settings.jsx
+- [x] Удалены Warming/Quarantine из UI
 
-## Validation Completed
-- Backend compile passed.
-- Runtime test file passed.
-- Frontend build passed.
+## In Progress
+- [ ] M1: Commit pending changes + push to main
 
 ## Next
-- Run final search gate.
-- Commit and push.
-- Deploy Railway.
-- Verify `/api/accounts/` returns direct status fields and no nested diagnostic payload.
+→ M1: git add + commit + push
+→ M2: проверить auto-deploy web на Railway
+→ M3: redeploy worker
+→ M4: smoke check
+
+## Незакоммиченные файлы
+- `backend/telegram_client.py` — connect timeout + is_out fix
+- `backend/worker_client.py` — Python 3.9 compat
+- `frontend/src/pages/Settings.jsx` — удалена секция Промпт
+
+## Команды
+```bash
+# M1 — commit
+git add backend/telegram_client.py backend/worker_client.py frontend/src/pages/Settings.jsx
+git commit -m "fix: connect timeout, worker_client compat, remove prompt section from Settings"
+git push origin main
+
+# M2 — web redeploy (если не auto)
+railway redeploy
+
+# M3 — worker redeploy
+railway variables --service tg-outreach-worker
+railway redeploy --service tg-outreach-worker
+
+# M4 — smoke
+open https://tg-outreach-production.up.railway.app
+```
+
+## Blockers
+- Нет
+
+## Audit log
+- 2026-04-22: план создан, изменения готовы к коммиту

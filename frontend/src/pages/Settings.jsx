@@ -185,21 +185,6 @@ export default function Settings() {
         )}
       </Section>
 
-      <Section title="Промпт">
-        <Field label="System Prompt">
-          <textarea rows={6} className={`${inputCls} font-mono text-xs leading-relaxed resize-y`}
-            value={form.system_prompt} onChange={(e) => set("system_prompt", e.target.value)} />
-        </Field>
-        <Field label={`Сообщений в контексте: ${form.context_messages}`}>
-          <div className="flex items-center gap-3">
-            <input type="range" min={3} max={30} value={form.context_messages}
-              onChange={(e) => set("context_messages", Number(e.target.value))}
-              className="flex-1 accent-blue-500" />
-            <span className="text-sm font-mono text-zinc-300 w-6 text-right">{form.context_messages}</span>
-          </div>
-        </Field>
-      </Section>
-
       <Section title="Авто-ответы">
         <div className="flex items-center justify-between">
           <div>

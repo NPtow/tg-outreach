@@ -1,20 +1,25 @@
-# TG Outreach Minimal Accounts Test Plan
+# Test Plan — Railway Deployment
 
-## Checks
-- Account list returns direct fields: `status`, `reason`, `is_online`, `can_receive`, `can_auto_reply`, `can_start_outreach`.
-- Account list does not return nested diagnostic account payload.
-- Removed warming files are not imported by backend or frontend.
-- Campaign account picker uses direct `can_receive`.
-- Inbox and auto-reply regression tests still pass.
+## Smoke checks (после каждого деплоя)
 
-## Commands
-- `/Users/NIKITA/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m compileall backend`
-- `/Users/NIKITA/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m unittest discover -s tests -p 'test_outreach_runtime.py'`
-- `cd frontend && npm run build`
-- `rg -n "warming|Warming|warmup|warm_|min_health_score|AccountWarming|WarmingAction|WarmingProfile|WarmingChannelPool|account_health" backend frontend/src tests`
+| Проверка | Как проверить | Pass |
+|---|---|---|
+| Frontend грузится | Открыть `https://tg-outreach-production.up.railway.app` | UI виден |
+| API отвечает | `curl https://...railway.app/api/accounts` → JSON | 200, не 502 |
+| Worker стартовал | Логи worker-сервиса → нет hanging > 60с | Строки с account connect |
+| Аккаунты в UI | Вкладка Accounts → список аккаунтов, статусы | Отображаются |
+| Auto-reply | Написать в TG аккаунту → получить ответ AI | Ответ пришёл |
 
-## Production Smoke
-- Deploy Railway service `tg-outreach`.
-- Call `GET /api/accounts/`.
-- Confirm each account has direct status fields and no nested diagnostic payload.
-- Confirm `/api/warming/*` is gone.
+## Negative cases
+| Сценарий | Ожидание |
+|---|---|
+| Мёртвый прокси у аккаунта | Таймаут 30с, статус `degraded`, не зависает |
+| Worker недоступен | Web-сервис возвращает 503, не крашится |
+| Неверный OpenAI ключ | Auto-reply не отвечает, ошибка в логах |
+
+## Release gates
+- [ ] Web deployment successful в Railway dashboard
+- [ ] Worker deployment successful в Railway dashboard
+- [ ] Нет ERROR уровня в web-логах при старте
+- [ ] Нет hanging в worker-логах при старте
+- [ ] Frontend открывается по production URL

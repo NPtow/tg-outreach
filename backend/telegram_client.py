@@ -237,6 +237,19 @@ def serialize_public_account(account: Account) -> dict:
         "proxy_port": account.proxy_port,
         "proxy_type": account.proxy_type or "SOCKS5",
         "proxy_user": account.proxy_user or "",
+        # compat fields for frontend
+        "needs_reauth": bool(getattr(account, "needs_reauth", False)),
+        "connection_state": _runtime_connection_state(account),
+        "session_state": account.session_state or _derive_session_state(account),
+        "proxy_state": account.proxy_state or "unknown",
+        "eligibility_state": "eligible" if status["can_start_outreach"] else "blocked_auth",
+        "session_source": account.session_source or "",
+        "last_error_code": account.last_error_code,
+        "last_error_message": account.last_error_message,
+        "last_connect_at": account.last_connect_at,
+        "last_proxy_check_at": account.last_proxy_check_at,
+        "last_seen_online_at": account.last_seen_online_at,
+        "proxy_last_rtt_ms": account.proxy_last_rtt_ms,
     }
 
 
@@ -553,7 +566,7 @@ def _record_outreach_message(
 
 
 async def _handle_message(account_id: int, event):
-    if event.is_out:
+    if getattr(event, "is_out", None) or getattr(getattr(event, "message", None), "out", False):
         return
     sender: User = await event.get_sender()
     if not sender or sender.bot:
