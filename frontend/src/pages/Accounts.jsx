@@ -27,7 +27,6 @@ const DEBUG_META = {
   eligible: { label: "Eligible", cls: "bg-emerald-500/10 text-emerald-400" },
   blocked_proxy: { label: "Blocked by proxy", cls: "bg-red-500/10 text-red-400" },
   blocked_auth: { label: "Blocked by auth", cls: "bg-amber-500/10 text-amber-400" },
-  blocked_resolution: { label: "Blocked by resolve", cls: "bg-orange-500/10 text-orange-400" },
 };
 
 function fmtTs(value) {
@@ -445,7 +444,7 @@ export default function Accounts() {
 
                     <div className="flex flex-wrap items-center gap-2">
                       <HealthBadge value={health.status} />
-                      <span className={`text-xs ${health.can_start_outreach ? "text-zinc-500" : "text-amber-400"}`}>
+                      <span className="text-xs text-zinc-500">
                         {health.reason}
                       </span>
                     </div>
@@ -454,7 +453,7 @@ export default function Accounts() {
                       <div>Онлайн: <span className="text-zinc-300">{health.is_online ? "Да" : "Нет"}</span></div>
                       <div>Принимает входящие: <span className="text-zinc-300">{health.can_receive ? "Да" : "Нет"}</span></div>
                       <div>Автоответ: <span className="text-zinc-300">{health.can_auto_reply ? "Готов" : "Недоступен"}</span></div>
-                      <div>Рассылка: <span className="text-zinc-300">{health.can_start_outreach ? "Можно запускать" : "Временно нельзя"}</span></div>
+                      <div>Рассылка: <span className="text-zinc-300">{health.can_receive ? "Готова" : "Недоступна"}</span></div>
                       <div>Обновлено: <span className="text-zinc-300">{fmtTs(health.updated_at)}</span></div>
                       <div>Прокси: <span className="text-zinc-300">{acc.proxy_host ? `${acc.proxy_type} ${acc.proxy_host}:${acc.proxy_port}` : "Без прокси"}</span></div>
                     </div>

@@ -106,6 +106,13 @@ def _derive_session_state(account: Account) -> str:
     return "missing"
 
 
+def _normalized_connection_state(account: Account) -> str:
+    connection_state = account.connection_state or "offline"
+    if connection_state == "quarantined":
+        return "offline"
+    return connection_state
+
+
 def _compute_eligibility(account: Account) -> str:
     if (account.proxy_state or "unknown") in {"failed", "timeout", "auth_failed"}:
         return "blocked_proxy"
@@ -115,9 +122,7 @@ def _compute_eligibility(account: Account) -> str:
         "recovery_failed",
     }:
         return "blocked_auth"
-    if (account.last_error_code or "") == "USERNAME_RESOLUTION_RESTRICTED":
-        return "blocked_resolution"
-    if (account.connection_state or "offline") == "online":
+    if _normalized_connection_state(account) == "online":
         return "eligible"
     return "blocked_auth"
 
@@ -133,25 +138,37 @@ def _account_updated_at(account: Account) -> Optional[datetime]:
     return max(timestamps) if timestamps else None
 
 
-def _clear_legacy_quarantine_state(account: Account) -> bool:
+def _clear_legacy_account_limit_state(account: Account) -> bool:
     dirty = False
-    if getattr(account, "quarantine_until", None):
-        account.quarantine_until = None
-        dirty = True
     if (account.connection_state or "") == "quarantined":
         account.connection_state = "offline"
         dirty = True
     if (account.eligibility_state or "") == "blocked_quarantine":
         account.eligibility_state = "blocked_auth" if getattr(account, "needs_reauth", False) else "ok"
         dirty = True
+    if (account.last_error_code or "") in {"PEER_FLOOD", "FLOOD_WAIT", "USERNAME_RESOLUTION_RESTRICTED"}:
+        account.last_error_code = None
+        account.last_error_message = None
+        account.last_error_at = None
+        dirty = True
+    if (account.eligibility_state or "") == "blocked_resolution":
+        account.eligibility_state = _compute_eligibility(account)
+        dirty = True
     return dirty
 
 
+def _public_error_fields(account: Account) -> tuple[Optional[str], Optional[str], Optional[datetime]]:
+    if (account.last_error_code or "") in {"PEER_FLOOD", "FLOOD_WAIT", "USERNAME_RESOLUTION_RESTRICTED"}:
+        return None, None, None
+    return account.last_error_code, account.last_error_message, account.last_error_at
+
+
 def build_public_account_health(account: Account) -> dict:
-    connection_state = account.connection_state or "offline"
+    connection_state = _normalized_connection_state(account)
     proxy_state = account.proxy_state or "unknown"
     session_state = account.session_state or _derive_session_state(account)
-    last_error_code = account.last_error_code or ""
+    public_error_code, public_error_message, public_error_at = _public_error_fields(account)
+    reason_error_code = public_error_code or ""
     needs_reauth = bool(getattr(account, "needs_reauth", False))
 
     proxy_ok = proxy_state not in {"failed", "timeout", "auth_failed"}
@@ -159,22 +176,14 @@ def build_public_account_health(account: Account) -> dict:
     is_online = connection_state == "online"
     can_receive = bool(is_online and proxy_ok and session_ok)
     can_auto_reply = bool(can_receive and getattr(account, "auto_reply", False))
-    outgoing_limited = last_error_code in {"PEER_FLOOD", "FLOOD_WAIT"}
-    can_start_outreach = bool(can_receive and not outgoing_limited)
+    can_start_outreach = bool(can_receive)
     status = "working" if can_receive else "not_working"
 
     if status == "working":
-        if last_error_code == "PEER_FLOOD":
-            reason = "Аккаунт онлайн, но Telegram временно ограничил исходящие сообщения"
-        elif last_error_code == "FLOOD_WAIT":
-            reason = "Аккаунт онлайн, но Telegram временно ограничил исходящие сообщения"
-        elif last_error_code == "USERNAME_RESOLUTION_RESTRICTED":
-            reason = "Аккаунт онлайн, но часть username не резолвится через Telegram API"
-        else:
-            reason = "Аккаунт онлайн и принимает сообщения"
-    elif last_error_code == "UserDeactivatedBanError":
+        reason = "Аккаунт онлайн и принимает сообщения"
+    elif reason_error_code == "UserDeactivatedBanError":
         reason = "Telegram деактивировал аккаунт"
-    elif last_error_code in {"AuthKeyDuplicatedError", "AuthKeyUnregisteredError"}:
+    elif reason_error_code in {"AuthKeyDuplicatedError", "AuthKeyUnregisteredError"}:
         reason = "Сессия Telegram отозвана, нужна повторная авторизация"
     elif needs_reauth or session_state in {"missing", "expired", "recovery_failed"}:
         reason = "Нужна повторная авторизация"
@@ -186,7 +195,7 @@ def build_public_account_health(account: Account) -> dict:
         reason = "Прокси не работает"
     elif connection_state == "connecting":
         reason = "Аккаунт подключается к Telegram"
-    elif connection_state == "degraded" or last_error_code == "CONNECT_FAILED":
+    elif connection_state == "degraded" or reason_error_code == "CONNECT_FAILED":
         reason = "Не удалось подключить Telegram-клиент"
     else:
         reason = "Telegram-клиент не подключён"
@@ -203,10 +212,10 @@ def build_public_account_health(account: Account) -> dict:
             "connection_state": connection_state,
             "proxy_state": proxy_state,
             "session_state": session_state,
-            "eligibility_state": account.eligibility_state or _compute_eligibility(account),
-            "last_error_code": account.last_error_code,
-            "last_error_message": account.last_error_message,
-            "last_error_at": account.last_error_at,
+            "eligibility_state": _compute_eligibility(account),
+            "last_error_code": public_error_code,
+            "last_error_message": public_error_message,
+            "last_error_at": public_error_at,
             "last_proxy_check_at": account.last_proxy_check_at,
             "last_connect_at": account.last_connect_at,
             "last_seen_online_at": account.last_seen_online_at,
@@ -219,15 +228,16 @@ def build_public_account_health(account: Account) -> dict:
 
 
 def _serialize_health(account: Account) -> dict:
+    last_error_code, last_error_message, last_error_at = _public_error_fields(account)
     return {
         "account_id": account.id,
-        "connection_state": account.connection_state or "offline",
+        "connection_state": _normalized_connection_state(account),
         "proxy_state": account.proxy_state or "unknown",
         "session_state": account.session_state or "missing",
         "eligibility_state": _compute_eligibility(account),
-        "last_error_code": account.last_error_code,
-        "last_error_message": account.last_error_message,
-        "last_error_at": account.last_error_at,
+        "last_error_code": last_error_code,
+        "last_error_message": last_error_message,
+        "last_error_at": last_error_at,
         "last_proxy_check_at": account.last_proxy_check_at,
         "last_connect_at": account.last_connect_at,
         "last_seen_online_at": account.last_seen_online_at,
@@ -295,18 +305,6 @@ async def _public_username_exists(username: Optional[str]) -> Optional[bool]:
     except Exception as exc:
         logger.warning("Public username check failed for %s: %s", normalized, exc)
         return None
-
-
-def _mark_username_resolution_restricted(account_id: int, username: str) -> dict:
-    health = _mark_error(
-        account_id,
-        "USERNAME_RESOLUTION_RESTRICTED",
-        f"Public username @{username.lstrip('@')} exists, but this account cannot resolve it via Telegram API",
-        connection_state="online",
-    )
-    if _ws_broadcast:
-        asyncio.create_task(_ws_broadcast({"event": "account_health", "account_id": account_id, "health": health}))
-    return health
 
 
 def _warmup_daily_cap(account: Account) -> int:
@@ -822,18 +820,13 @@ def get_account_health(account_id: int) -> dict:
         db.close()
 
 
-async def clear_quarantine(account_id: int) -> dict:
-    """Backward-compatible alias for the unified runtime reset flow."""
-    return await reset_account_runtime(account_id, requested_by="clear-quarantine")
-
-
 async def reset_account_runtime(account_id: int, requested_by: str = "reset") -> dict:
     db = SessionLocal()
     try:
         acc = db.query(Account).filter(Account.id == account_id).first()
         if not acc:
             return {"ok": False, "error": "Account not found", "requested_by": requested_by}
-        _clear_legacy_quarantine_state(acc)
+        _clear_legacy_account_limit_state(acc)
         acc.is_active = True
         acc.connection_state = "offline"
         acc.last_error_code = None
@@ -851,7 +844,7 @@ async def reconnect_account_runtime(account_id: int, requested_by: str = "system
         acc = db.query(Account).filter(Account.id == account_id).first()
         if not acc:
             return {"ok": False, "error": "Account not found", "requested_by": requested_by}
-        if _clear_legacy_quarantine_state(acc):
+        if _clear_legacy_account_limit_state(acc):
             db.commit()
         _persist_account_health(
             account_id,
@@ -1014,12 +1007,7 @@ async def _supervise_accounts():
         try:
             accounts = db.query(Account).all()
             for acc in accounts:
-                dirty = _clear_legacy_quarantine_state(acc)
-                # Clear resolution restriction so account can be retried next campaign
-                if acc.last_error_code == "USERNAME_RESOLUTION_RESTRICTED":
-                    acc.last_error_code = None
-                    acc.last_error_message = None
-                    dirty = True
+                dirty = _clear_legacy_account_limit_state(acc)
                 if dirty:
                     db.commit()
 
@@ -1112,7 +1100,7 @@ async def start_all_accounts():
     try:
         accounts = db.query(Account).all()
         for acc in accounts:
-            if _clear_legacy_quarantine_state(acc):
+            if _clear_legacy_account_limit_state(acc):
                 db.commit()
             has_session = acc.session_string or os.path.exists(_session_path(acc.id) + ".session")
             if has_session:
@@ -1477,14 +1465,14 @@ async def _campaign_worker(campaign_id: int):
                     logger.info(f"Campaign {campaign_id}: sent to {target.username}")
                 except FloodWaitError as e:
                     wait_secs = e.seconds + 30
-                    _mark_error(_account_id, "FLOOD_WAIT", f"FloodWait {e.seconds}s")
+                    _clear_error(_account_id, connection_state="online", last_seen_online_at=_utcnow())
                     logger.warning(f"Campaign {campaign_id}: FloodWait {e.seconds}s on account {_account_id}, sleeping {wait_secs}s")
                     db.commit()
                     await asyncio.sleep(wait_secs)
                     continue
                 except PeerFloodError:
                     wait_secs = 3600
-                    _mark_error(_account_id, "PEER_FLOOD", "PeerFloodError — sleeping 1h")
+                    _clear_error(_account_id, connection_state="online", last_seen_online_at=_utcnow())
                     logger.error(f"Campaign {campaign_id}: PeerFloodError on account {_account_id}, sleeping 1h")
                     db.commit()
                     await asyncio.sleep(wait_secs)
@@ -1494,43 +1482,18 @@ async def _campaign_worker(campaign_id: int):
                     if isinstance(e, (UsernameNotOccupiedError, UsernameInvalidError)):
                         public_exists = await _public_username_exists(target.username)
 
-                    # public_exists=True → confirmed resolution issue; public_exists=None → check failed,
-                    # treat conservatively (don't permanently fail — try another account or pause)
+                    # public_exists=True → confirmed target resolution issue; public_exists=None → check failed.
+                    # Either way this is a target failure, not an account-health restriction.
                     if public_exists or (public_exists is None and isinstance(e, (UsernameNotOccupiedError, UsernameInvalidError))):
-                        _mark_username_resolution_restricted(_account_id, target.username)
-
-                        # Check if any other account in campaign can still resolve
-                        still_eligible = False
-                        db.expire_all()
-                        for aid in acc_ids:
-                            if aid not in _clients:
-                                continue
-                            candidate = db.query(Account).filter(Account.id == aid).first()
-                            if candidate and _compute_eligibility(candidate) == "eligible":
-                                still_eligible = True
-                                break
-
-                        if still_eligible:
-                            # Another account may be able to send — retry on next iteration
-                            logger.warning(
-                                "Campaign %s: account %s cannot resolve @%s, will retry with another account",
-                                campaign_id, _account_id, target.username,
-                            )
-                            db.commit()
-                            continue
-                        else:
-                            # No accounts can resolve this username — mark target failed and move on
-                            target.status = "failed"
-                            target.error = (
-                                f"@{target.username} cannot be resolved by any available account "
-                                "(likely DC routing restriction)"
-                            )
-                            logger.warning(
-                                "Campaign %s: no accounts can resolve @%s — marking failed",
-                                campaign_id, target.username,
-                            )
-                            db.commit()
-                            continue
+                        _clear_error(_account_id, connection_state="online", last_seen_online_at=_utcnow())
+                        target.status = "failed"
+                        target.error = f"@{target.username} не резолвится через Telegram API"
+                        logger.warning(
+                            "Campaign %s: account %s cannot resolve @%s — marking target failed",
+                            campaign_id, _account_id, target.username,
+                        )
+                        db.commit()
+                        continue
 
                     target.status = "failed"
                     target.error = str(e)

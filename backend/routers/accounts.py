@@ -271,18 +271,6 @@ async def set_session(account_id: int, data: SetSessionRequest, db: Session = De
     return {"ok": True, "runtime": result}
 
 
-@router.post("/{account_id}/clear-quarantine")
-async def clear_quarantine(account_id: int, db: Session = Depends(get_db)):
-    acc = db.query(Account).filter(Account.id == account_id).first()
-    if not acc:
-        raise HTTPException(404, "Account not found")
-    if owns_telegram_runtime():
-        result = await tg.clear_quarantine(account_id)
-    else:
-        result = await _forward_or_fail("POST", f"/internal/runtime/accounts/{account_id}/clear-quarantine")
-    return result
-
-
 @router.post("/{account_id}/unblock")
 async def unblock_account(account_id: int, db: Session = Depends(get_db)):
     """Reset account runtime state through the owning telegram worker."""

@@ -46,11 +46,6 @@ async def reconnect(account_id: int):
     return result
 
 
-@router.post("/accounts/{account_id}/clear-quarantine", dependencies=[Depends(require_worker_token)])
-async def clear_quarantine(account_id: int):
-    return await tg.clear_quarantine(account_id)
-
-
 @router.post("/accounts/{account_id}/unblock", dependencies=[Depends(require_worker_token)])
 async def unblock(account_id: int):
     return await tg.reset_account_runtime(account_id, requested_by="internal-unblock")

@@ -71,6 +71,82 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertNotIn("connection_state", payload)
         self.assertNotIn("eligibility_state", payload)
 
+    def test_public_health_ignores_transient_outgoing_limits(self):
+        for code, message in (
+            ("PEER_FLOOD", "PeerFloodError — account quarantined"),
+            ("FLOOD_WAIT", "FloodWait 600s"),
+        ):
+            account = Account(
+                id=15,
+                name="Ana",
+                phone="+573122997093",
+                app_id="2040",
+                app_hash="hash",
+                auto_reply=True,
+            )
+            account.connection_state = "online"
+            account.proxy_state = "ok"
+            account.session_state = "valid"
+            account.eligibility_state = "eligible"
+            account.last_error_code = code
+            account.last_error_message = message
+
+            payload = accounts_router._serialize_account(account)
+
+            self.assertEqual(payload["health"]["status"], "working")
+            self.assertEqual(payload["health"]["reason"], "Аккаунт онлайн и принимает сообщения")
+            self.assertTrue(payload["health"]["can_start_outreach"])
+            self.assertIsNone(payload["health"]["debug"]["last_error_code"])
+            self.assertIsNone(payload["health"]["debug"]["last_error_message"])
+
+    def test_resolution_restriction_does_not_block_account_health(self):
+        account = Account(
+            id=16,
+            name="Ana",
+            phone="+573122997094",
+            app_id="2040",
+            app_hash="hash",
+            auto_reply=True,
+        )
+        account.connection_state = "online"
+        account.proxy_state = "ok"
+        account.session_state = "valid"
+        account.eligibility_state = "blocked_resolution"
+        account.last_error_code = "USERNAME_RESOLUTION_RESTRICTED"
+        account.last_error_message = "Public username exists, but this account cannot resolve it"
+
+        public_health = tg.build_public_account_health(account)
+        internal_health = tg._serialize_health(account)
+
+        self.assertEqual(public_health["status"], "working")
+        self.assertTrue(public_health["can_start_outreach"])
+        self.assertEqual(public_health["debug"]["eligibility_state"], "eligible")
+        self.assertIsNone(public_health["debug"]["last_error_code"])
+        self.assertEqual(internal_health["eligibility_state"], "eligible")
+        self.assertIsNone(internal_health["last_error_code"])
+
+    def test_public_health_normalizes_legacy_quarantined_connection_state(self):
+        account = Account(
+            id=17,
+            name="Ana",
+            phone="+573122997095",
+            app_id="2040",
+            app_hash="hash",
+            auto_reply=True,
+        )
+        account.connection_state = "quarantined"
+        account.proxy_state = "ok"
+        account.session_state = "valid"
+        account.eligibility_state = "blocked_quarantine"
+
+        public_health = tg.build_public_account_health(account)
+        internal_health = tg._serialize_health(account)
+
+        self.assertEqual(public_health["debug"]["connection_state"], "offline")
+        self.assertEqual(public_health["debug"]["eligibility_state"], "blocked_auth")
+        self.assertEqual(internal_health["connection_state"], "offline")
+        self.assertEqual(internal_health["eligibility_state"], "blocked_auth")
+
     def test_unblock_forwards_to_worker_when_runtime_is_split(self):
         with self._db() as db:
             db.add(Account(name="Ana", phone="+1", app_id="2040", app_hash="hash"))

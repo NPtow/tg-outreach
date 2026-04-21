@@ -218,7 +218,7 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
   const [showPicker, setShowPicker] = useState(false);
 
   const inputCls = "w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 transition-colors";
-  const activeAccounts = accounts.filter(a => a.health?.can_start_outreach);
+  const activeAccounts = accounts.filter(a => a.health?.can_receive);
 
   const toggleAccount = (id) => {
     setForm(f => {

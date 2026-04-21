@@ -56,7 +56,6 @@ class Account(Base):
     last_proxy_check_at = Column(DateTime, nullable=True)
     last_connect_at = Column(DateTime, nullable=True)
     last_seen_online_at = Column(DateTime, nullable=True)
-    quarantine_until = Column(DateTime, nullable=True)
     warmup_level = Column(Integer, default=0)
     session_source = Column(String(30), nullable=True)
     proxy_last_rtt_ms = Column(Integer, nullable=True)

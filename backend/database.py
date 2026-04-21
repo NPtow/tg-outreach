@@ -52,7 +52,6 @@ def init_db():
         ("accounts", "last_proxy_check_at TIMESTAMP"),
         ("accounts", "last_connect_at TIMESTAMP"),
         ("accounts", "last_seen_online_at TIMESTAMP"),
-        ("accounts", "quarantine_until TIMESTAMP"),
         ("accounts", "warmup_level INTEGER DEFAULT 0"),
         ("accounts", "session_source TEXT"),
         ("accounts", "proxy_last_rtt_ms INTEGER"),
