@@ -19,7 +19,8 @@ from backend.worker_client import forward_to_worker
 import backend.telegram_client as tg
 import backend.warming_worker as ww
 
-logging.basicConfig(level=logging.INFO)
+import sys
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(levelname)s:%(name)s:%(message)s")
 
 # WebSocket connection manager
 _ws_clients: Set[WebSocket] = set()
