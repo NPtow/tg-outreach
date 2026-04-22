@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import Account, Conversation, Message, Campaign, CampaignTarget
+from backend.models import Account, Conversation, Message, Campaign, CampaignTarget, ProxyPool
 from backend.runtime_config import owns_telegram_runtime
 from backend.security import decrypt_value, encrypt_value
 from backend.worker_client import forward_to_worker
@@ -29,6 +29,7 @@ class AccountCreate(BaseModel):
     phone: str
     app_id: str = "2040"
     app_hash: str = "b18441a1ff607e10a989891a5462e627"
+    proxy_id: Optional[int] = None
     proxy_host: str = ""
     proxy_port: Optional[int] = None
     proxy_type: str = "SOCKS5"
@@ -117,16 +118,47 @@ def create_account(data: AccountCreate, db: Session = Depends(get_db)):
     existing = db.query(Account).filter(Account.phone == data.phone).first()
     if existing:
         raise HTTPException(400, "Account with this phone already exists")
+    proxy_host = data.proxy_host or None
+    proxy_port = data.proxy_port or None
+    proxy_type = (data.proxy_type or "SOCKS5").upper()
+    proxy_user = data.proxy_user or None
+    proxy_pass = data.proxy_pass or ""
+
+    if data.proxy_id:
+        proxy = db.query(ProxyPool).filter(ProxyPool.id == data.proxy_id).first()
+        if not proxy:
+            raise HTTPException(400, "Proxy not found")
+        proxy_host = proxy.host
+        proxy_port = proxy.port
+        proxy_type = (proxy.proxy_type or "SOCKS5").upper()
+        proxy_user = proxy.username or None
+        proxy_pass = proxy.password or ""
+    elif proxy_pass == "__keep__":
+        proxy = None
+        if proxy_host and proxy_port:
+            query = db.query(ProxyPool).filter(
+                ProxyPool.host == proxy_host,
+                ProxyPool.port == int(proxy_port),
+            )
+            if proxy_user:
+                query = query.filter(ProxyPool.username == proxy_user)
+            proxy = query.first()
+        if not proxy:
+            raise HTTPException(400, "Proxy password placeholder cannot be used when creating an account")
+        proxy_type = (proxy.proxy_type or proxy_type or "SOCKS5").upper()
+        proxy_user = proxy.username or proxy_user
+        proxy_pass = proxy.password or ""
+
     acc = Account(
         name=data.name,
         phone=data.phone,
         app_id=data.app_id,
         app_hash=encrypt_value(data.app_hash),
-        proxy_host=data.proxy_host or None,
-        proxy_port=data.proxy_port or None,
-        proxy_type=(data.proxy_type or "SOCKS5").upper(),
-        proxy_user=data.proxy_user or None,
-        proxy_pass=encrypt_value(data.proxy_pass) if data.proxy_pass else None,
+        proxy_host=proxy_host,
+        proxy_port=proxy_port,
+        proxy_type=proxy_type,
+        proxy_user=proxy_user,
+        proxy_pass=encrypt_value(proxy_pass) if proxy_pass else None,
         session_source="phone_code",
     )
     db.add(acc)

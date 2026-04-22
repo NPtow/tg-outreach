@@ -11,7 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.database import get_db, Base
-from backend.models import Account, Conversation, Message, Settings
+from backend.models import Account, Conversation, Message, ProxyPool, Settings
 from backend.routers import accounts as accounts_router
 import backend.telegram_client as tg
 
@@ -258,6 +258,95 @@ class OutreachRuntimeTests(unittest.TestCase):
         finally:
             client.close()
             app.dependency_overrides.clear()
+
+    def test_create_account_copies_proxy_pool_password_by_proxy_id(self):
+        with self._db() as db:
+            db.add(
+                ProxyPool(
+                    host="79.175.96.142",
+                    port=8184,
+                    proxy_type="SOCKS5",
+                    username="user397647",
+                    password="z4a6tw",
+                )
+            )
+            db.commit()
+
+        app = FastAPI()
+        app.include_router(accounts_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            response = client.post(
+                "/api/accounts/",
+                json={"name": "Vasilisa", "phone": "+573122997092", "proxy_id": 1},
+            )
+            self.assertEqual(response.status_code, 200)
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        with self._db() as db:
+            account = db.query(Account).filter(Account.phone == "+573122997092").first()
+            self.assertEqual(account.proxy_host, "79.175.96.142")
+            self.assertEqual(account.proxy_port, 8184)
+            self.assertEqual(account.proxy_user, "user397647")
+            self.assertEqual(account.proxy_pass, "z4a6tw")
+
+    def test_create_account_resolves_keep_proxy_password_placeholder(self):
+        with self._db() as db:
+            db.add(
+                ProxyPool(
+                    host="82.39.223.11",
+                    port=8184,
+                    proxy_type="SOCKS5",
+                    username="user397647",
+                    password="z4a6tw",
+                )
+            )
+            db.commit()
+
+        app = FastAPI()
+        app.include_router(accounts_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            response = client.post(
+                "/api/accounts/",
+                json={
+                    "name": "Old Frontend",
+                    "phone": "+573122997093",
+                    "proxy_host": "82.39.223.11",
+                    "proxy_port": 8184,
+                    "proxy_type": "SOCKS5",
+                    "proxy_user": "user397647",
+                    "proxy_pass": "__keep__",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        with self._db() as db:
+            account = db.query(Account).filter(Account.phone == "+573122997093").first()
+            self.assertEqual(account.proxy_pass, "z4a6tw")
 
     def test_handle_message_persists_incoming_even_when_auto_reply_is_disabled(self):
         with self._db() as db:

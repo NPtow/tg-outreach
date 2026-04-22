@@ -119,11 +119,7 @@ function AddAccountModal({ onClose, onAdded }) {
       const payload = {
         name, phone,
         ...(selectedProxy ? {
-          proxy_host: selectedProxy.host,
-          proxy_port: selectedProxy.port,
-          proxy_type: selectedProxy.proxy_type,
-          proxy_user: selectedProxy.username || "",
-          proxy_pass: selectedProxy.has_password ? "__keep__" : "",
+          proxy_id: selectedProxy.id,
         } : {}),
       };
       const acc = await api.createAccount(payload);
