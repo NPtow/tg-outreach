@@ -46,6 +46,43 @@ class OutreachRuntimeTests(unittest.TestCase):
     def _db(self):
         return self.Session()
 
+    def test_telegram_client_inputs_are_normalized_before_telethon(self):
+        account = Account(
+            id=20,
+            name="Ana",
+            phone=573122997098,
+            app_id=2040,
+            app_hash=123456,
+            auto_reply=True,
+        )
+        account.device_model = 777
+        account.system_version = 888
+        account.app_version = 999
+        account.lang_code = 111
+        account.proxy_host = 12345
+        account.proxy_port = "8184"
+        account.proxy_type = "SOCKS5"
+        account.proxy_user = 222
+        account.proxy_pass = 333
+
+        proxy = tg._build_proxy(account)
+        self.assertEqual(proxy["addr"], "12345")
+        self.assertEqual(proxy["port"], 8184)
+        self.assertEqual(proxy["username"], "222")
+        self.assertEqual(proxy["password"], "333")
+
+        with patch("backend.telegram_client.TelegramClient") as telegram_client:
+            tg._make_fresh_client(account)
+
+        args, kwargs = telegram_client.call_args
+        self.assertEqual(args[1], 2040)
+        self.assertEqual(args[2], "123456")
+        self.assertEqual(kwargs["proxy"]["addr"], "12345")
+        self.assertEqual(kwargs["device_model"], "777")
+        self.assertEqual(kwargs["system_version"], "888")
+        self.assertEqual(kwargs["app_version"], "999")
+        self.assertEqual(kwargs["lang_code"], "111")
+
     def test_serialize_account_returns_simple_public_status(self):
         account = Account(
             id=14,

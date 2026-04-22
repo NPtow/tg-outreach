@@ -65,36 +65,73 @@ def _session_path(account_id: int) -> str:
     return os.path.join(SESSIONS_DIR, f"account_{account_id}")
 
 
+def _as_str(value, default: str = "") -> str:
+    if value is None:
+        return default
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value)
+
+
+def _decrypt_or_plain(value) -> str:
+    text = _as_str(value)
+    if not text:
+        return ""
+    return decrypt_value(text) or text
+
+
 def _build_proxy(account: Account):
-    if not account.proxy_host or not account.proxy_port:
+    proxy_host = _as_str(getattr(account, "proxy_host", None)).strip()
+    proxy_port = getattr(account, "proxy_port", None)
+    if not proxy_host or not proxy_port:
         return None
     type_map = {"HTTP": "http", "SOCKS5": "socks5", "SOCKS4": "socks4"}
+    proxy_user = _as_str(getattr(account, "proxy_user", None)).strip() or None
+    proxy_pass = _decrypt_or_plain(getattr(account, "proxy_pass", None)) or None
     return {
-        "proxy_type": type_map.get((account.proxy_type or "SOCKS5").upper(), "socks5"),
-        "addr": account.proxy_host,
-        "port": int(account.proxy_port),
-        "username": account.proxy_user or None,
-        "password": decrypt_value(account.proxy_pass) or None,
+        "proxy_type": type_map.get(_as_str(getattr(account, "proxy_type", None), "SOCKS5").upper(), "socks5"),
+        "addr": proxy_host,
+        "port": int(proxy_port),
+        "username": proxy_user,
+        "password": proxy_pass,
         "rdns": True,
     }
 
 
+def _client_api_credentials(account: Account) -> tuple[int, str]:
+    app_id = int(_as_str(getattr(account, "app_id", None), "2040"))
+    app_hash = _decrypt_or_plain(getattr(account, "app_hash", None))
+    return app_id, app_hash
+
+
+def _client_device_kwargs(account: Account) -> dict:
+    return {
+        "device_model": _as_str(getattr(account, "device_model", None), "Desktop") or "Desktop",
+        "system_version": _as_str(getattr(account, "system_version", None), "Windows 10") or "Windows 10",
+        "app_version": _as_str(getattr(account, "app_version", None), "6.7.5 x64") or "6.7.5 x64",
+        "lang_code": _as_str(getattr(account, "lang_code", None), "ru") or "ru",
+        "system_lang_code": "ru-RU",
+    }
+
+
+def _make_telegram_client(account: Account, session) -> TelegramClient:
+    app_id, app_hash = _client_api_credentials(account)
+    return TelegramClient(
+        session,
+        app_id,
+        app_hash,
+        proxy=_build_proxy(account),
+        **_client_device_kwargs(account),
+    )
+
+
 def _make_client(account: Account) -> TelegramClient:
-    proxy = _build_proxy(account)
-    session_string = decrypt_value(account.session_string)
-    app_hash = decrypt_value(account.app_hash) or account.app_hash
+    session_string = _decrypt_or_plain(getattr(account, "session_string", None))
     if session_string:
         session = StringSession(session_string)
     else:
         session = _session_path(account.id)
-    return TelegramClient(
-        session, int(account.app_id), app_hash, proxy=proxy,
-        device_model=getattr(account, "device_model", None) or "Desktop",
-        system_version=getattr(account, "system_version", None) or "Windows 10",
-        app_version=getattr(account, "app_version", None) or "6.7.5 x64",
-        lang_code=getattr(account, "lang_code", None) or "ru",
-        system_lang_code="ru-RU",
-    )
+    return _make_telegram_client(account, session)
 
 
 def _utcnow() -> datetime:
@@ -347,7 +384,9 @@ async def _proxy_connectivity_check(account: Account) -> dict:
     target_host = "149.154.167.50"
     target_port = 443
     try:
-        if account.proxy_host and account.proxy_port:
+        proxy_host = _as_str(getattr(account, "proxy_host", None)).strip()
+        proxy_port = getattr(account, "proxy_port", None)
+        if proxy_host and proxy_port:
             from python_socks import ProxyType
             from python_socks.async_.asyncio import Proxy
 
@@ -357,11 +396,11 @@ async def _proxy_connectivity_check(account: Account) -> dict:
                 "HTTP": ProxyType.HTTP,
             }
             proxy = Proxy.create(
-                proxy_type=type_map.get((account.proxy_type or "SOCKS5").upper(), ProxyType.SOCKS5),
-                host=account.proxy_host,
-                port=int(account.proxy_port),
-                username=account.proxy_user or None,
-                password=decrypt_value(account.proxy_pass) or None,
+                proxy_type=type_map.get(_as_str(getattr(account, "proxy_type", None), "SOCKS5").upper(), ProxyType.SOCKS5),
+                host=proxy_host,
+                port=int(proxy_port),
+                username=_as_str(getattr(account, "proxy_user", None)).strip() or None,
+                password=_decrypt_or_plain(getattr(account, "proxy_pass", None)) or None,
             )
             sock = await asyncio.wait_for(proxy.connect(dest_host=target_host, dest_port=target_port), timeout=10)
             sock.close()
@@ -754,11 +793,11 @@ async def convert_tdata_to_session(
     if proxy_host and proxy_port:
         type_map = {"HTTP": "http", "SOCKS5": "socks5", "SOCKS4": "socks4"}
         proxy = {
-            "proxy_type": type_map.get((proxy_type or "SOCKS5").upper(), "socks5"),
-            "addr": proxy_host,
+            "proxy_type": type_map.get(_as_str(proxy_type, "SOCKS5").upper(), "socks5"),
+            "addr": _as_str(proxy_host),
             "port": int(proxy_port),
-            "username": proxy_user or None,
-            "password": proxy_pass or None,
+            "username": _as_str(proxy_user).strip() or None,
+            "password": _as_str(proxy_pass).strip() or None,
             "rdns": True,
         }
 
@@ -1107,23 +1146,14 @@ async def login_new_account(account: Account, phone_code: str, code: str, passwo
     try:
         if partial_session:
             # Use the session from send_code_request — same auth key, Telegram accepts the code
-            proxy = _build_proxy(account)
-            app_hash = decrypt_value(account.app_hash) or account.app_hash
-            client = TelegramClient(
-                StringSession(partial_session), int(account.app_id), app_hash, proxy=proxy,
-                device_model=getattr(account, "device_model", None) or "Desktop",
-                system_version=getattr(account, "system_version", None) or "Windows 10",
-                app_version=getattr(account, "app_version", None) or "6.7.5 x64",
-                lang_code=getattr(account, "lang_code", None) or "ru",
-                system_lang_code="ru-RU",
-            )
+            client = _make_telegram_client(account, StringSession(_as_str(partial_session)))
         else:
             client = _make_fresh_client(account)
     except (ValueError, Exception) as e:
         return {"ok": False, "error": f"Failed to create client: {e}"}
     try:
         await client.connect()
-        await client.sign_in(account.phone, code, phone_code_hash=phone_code)
+        await client.sign_in(_as_str(account.phone), _as_str(code), phone_code_hash=_as_str(phone_code))
         session_str = client.session.save()
         await client.disconnect()
         db = SessionLocal()
@@ -1140,7 +1170,7 @@ async def login_new_account(account: Account, phone_code: str, code: str, passwo
     except Exception as e:
         if "SessionPasswordNeededError" in type(e).__name__ and password:
             try:
-                await client.sign_in(password=password)
+                await client.sign_in(password=_as_str(password))
                 session_str = client.session.save()
                 await client.disconnect()
                 db = SessionLocal()
@@ -1163,16 +1193,7 @@ async def login_new_account(account: Account, phone_code: str, code: str, passwo
 
 def _make_fresh_client(account: Account) -> TelegramClient:
     """Create a client with a blank session — used for re-auth flows where the old session may be dead."""
-    proxy = _build_proxy(account)
-    app_hash = decrypt_value(account.app_hash) or account.app_hash
-    return TelegramClient(
-        StringSession(), int(account.app_id), app_hash, proxy=proxy,
-        device_model=getattr(account, "device_model", None) or "Desktop",
-        system_version=getattr(account, "system_version", None) or "Windows 10",
-        app_version=getattr(account, "app_version", None) or "6.7.5 x64",
-        lang_code=getattr(account, "lang_code", None) or "ru",
-        system_lang_code="ru-RU",
-    )
+    return _make_telegram_client(account, StringSession())
 
 
 async def send_code_request(account: Account) -> dict:
@@ -1180,7 +1201,7 @@ async def send_code_request(account: Account) -> dict:
     client = _make_fresh_client(account)
     try:
         await client.connect()
-        result = await client.send_code_request(account.phone)
+        result = await client.send_code_request(_as_str(account.phone))
         # Telethon can store server_address as int (IPv4 integer) after connect —
         # StringSession.save() requires str/bytes, so we coerce it here.
         sess = client.session
@@ -1192,6 +1213,7 @@ async def send_code_request(account: Account) -> dict:
         await client.disconnect()
         return {"ok": True, "phone_code_hash": result.phone_code_hash, "partial_session": partial_session}
     except Exception as e:
+        logger.exception("send_code_request failed for account %s", getattr(account, "id", None))
         await client.disconnect()
         return {"ok": False, "error": str(e)}
 
