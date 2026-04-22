@@ -110,11 +110,11 @@ def _derive_session_state(account: Account) -> str:
 
 
 def _runtime_connection_state(account: Account) -> str:
-    """Use the live Telethon runtime as source of truth; DB state is only a log."""
+    """Prefer local runtime, but fall back to persisted state in split/multi-instance deployments."""
     if account.id in _clients:
         return "online"
     stored_state = account.connection_state or "offline"
-    if stored_state in {"connecting", "degraded", "reauth_required"}:
+    if stored_state in _SUPPORTED_CONNECTION_STATES:
         return stored_state
     return "offline"
 
@@ -128,7 +128,7 @@ def _compute_eligibility(account: Account) -> str:
         "recovery_failed",
     }:
         return "blocked_auth"
-    if account.id in _clients:
+    if _runtime_connection_state(account) == "online":
         return "eligible"
     return "blocked_runtime"
 
@@ -216,6 +216,7 @@ def build_account_status(account: Account) -> dict:
 
 def serialize_public_account(account: Account) -> dict:
     status = build_account_status(account)
+    eligibility_state = _compute_eligibility(account)
     return {
         "id": account.id,
         "name": account.name,
@@ -242,7 +243,7 @@ def serialize_public_account(account: Account) -> dict:
         "connection_state": _runtime_connection_state(account),
         "session_state": account.session_state or _derive_session_state(account),
         "proxy_state": account.proxy_state or "unknown",
-        "eligibility_state": "eligible" if status["can_start_outreach"] else "blocked_auth",
+        "eligibility_state": eligibility_state,
         "session_source": account.session_source or "",
         "last_error_code": account.last_error_code,
         "last_error_message": account.last_error_message,

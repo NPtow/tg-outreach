@@ -68,10 +68,8 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertTrue(payload["can_receive"])
         self.assertTrue(payload["can_auto_reply"])
         self.assertTrue(payload["can_start_outreach"])
-        self.assertNotIn("health", payload)
-        self.assertNotIn("debug", payload)
-        self.assertNotIn("connection_state", payload)
-        self.assertNotIn("eligibility_state", payload)
+        self.assertEqual(payload["connection_state"], "online")
+        self.assertEqual(payload["eligibility_state"], "eligible")
 
     def test_public_status_ignores_transient_outgoing_limits(self):
         for code, message in (
@@ -147,6 +145,50 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(public_status["status"], "not_working")
         self.assertEqual(internal_state["connection_state"], "offline")
         self.assertEqual(internal_state["eligibility_state"], "blocked_runtime")
+
+    def test_public_status_keeps_online_state_from_db_when_local_client_is_absent(self):
+        account = Account(
+            id=18,
+            name="Ana",
+            phone="+573122997096",
+            app_id="2040",
+            app_hash="hash",
+            auto_reply=True,
+        )
+        account.connection_state = "online"
+        account.proxy_state = "ok"
+        account.session_state = "valid"
+        account.needs_reauth = False
+
+        public_status = tg.build_account_status(account)
+        payload = tg.serialize_public_account(account)
+
+        self.assertTrue(public_status["is_online"])
+        self.assertEqual(public_status["status"], "working")
+        self.assertTrue(public_status["can_start_outreach"])
+        self.assertEqual(payload["connection_state"], "online")
+        self.assertEqual(payload["eligibility_state"], "eligible")
+
+    def test_public_payload_marks_runtime_block_when_session_is_valid_but_client_is_offline(self):
+        account = Account(
+            id=19,
+            name="Ana",
+            phone="+573122997097",
+            app_id="2040",
+            app_hash="hash",
+            auto_reply=True,
+        )
+        account.connection_state = "offline"
+        account.proxy_state = "ok"
+        account.session_state = "valid"
+        account.needs_reauth = False
+
+        payload = tg.serialize_public_account(account)
+
+        self.assertEqual(payload["connection_state"], "offline")
+        self.assertFalse(payload["can_start_outreach"])
+        self.assertEqual(payload["reason"], "Telegram-клиент не подключён")
+        self.assertEqual(payload["eligibility_state"], "blocked_runtime")
 
     def test_unblock_forwards_to_worker_when_runtime_is_split(self):
         with self._db() as db:
