@@ -48,6 +48,9 @@ _campaign_tasks: Dict[int, asyncio.Task] = {}
 SESSIONS_DIR = "sessions"
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 
+DEFAULT_API_ID = 2040
+DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
+
 _ws_broadcast = None
 _MSK_OFFSET = timedelta(hours=3)
 _USERNAME_PAGE_CACHE: Dict[str, tuple[float, bool]] = {}
@@ -96,6 +99,11 @@ def _debug_proxy_shape(proxy) -> str:
     )
 
 
+def _looks_like_api_hash(value: str) -> bool:
+    text = _as_str(value).strip()
+    return len(text) == 32 and all(ch in "0123456789abcdefABCDEF" for ch in text)
+
+
 def _build_proxy(account: Account):
     proxy_host = _as_str(getattr(account, "proxy_host", None)).strip()
     proxy_port = getattr(account, "proxy_port", None)
@@ -115,8 +123,26 @@ def _build_proxy(account: Account):
 
 
 def _client_api_credentials(account: Account) -> tuple[int, str]:
-    app_id = int(_as_str(getattr(account, "app_id", None), "2040"))
-    app_hash = _decrypt_or_plain(getattr(account, "app_hash", None))
+    try:
+        app_id = int(_as_str(getattr(account, "app_id", None), str(DEFAULT_API_ID)))
+    except (TypeError, ValueError):
+        logger.warning(
+            "api_credentials_diag account_id=%s bad_app_id=%s using_default=yes",
+            getattr(account, "id", None),
+            _debug_shape(getattr(account, "app_id", None)),
+        )
+        app_id = DEFAULT_API_ID
+
+    raw_app_hash = getattr(account, "app_hash", None)
+    app_hash = _as_str(_decrypt_or_plain(raw_app_hash)).strip()
+    if not _looks_like_api_hash(app_hash):
+        logger.warning(
+            "api_credentials_diag account_id=%s bad_app_hash=%s raw_app_hash=%s using_default=yes",
+            getattr(account, "id", None),
+            _debug_shape(app_hash),
+            _debug_shape(raw_app_hash),
+        )
+        app_hash = DEFAULT_API_HASH
     return app_id, app_hash
 
 
@@ -132,13 +158,22 @@ def _client_device_kwargs(account: Account) -> dict:
 
 def _make_telegram_client(account: Account, session) -> TelegramClient:
     app_id, app_hash = _client_api_credentials(account)
-    return TelegramClient(
+    client = TelegramClient(
         session,
         app_id,
         app_hash,
         proxy=_build_proxy(account),
         **_client_device_kwargs(account),
     )
+    if getattr(client, "api_hash", None) != app_hash:
+        logger.warning(
+            "api_hash_coerce_diag account_id=%s client_api_hash=%s expected_api_hash=%s",
+            getattr(account, "id", None),
+            _debug_shape(getattr(client, "api_hash", None)),
+            _debug_shape(app_hash),
+        )
+        client.api_hash = app_hash
+    return client
 
 
 def _make_client(account: Account) -> TelegramClient:

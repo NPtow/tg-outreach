@@ -76,7 +76,7 @@ class OutreachRuntimeTests(unittest.TestCase):
 
         args, kwargs = telegram_client.call_args
         self.assertEqual(args[1], 2040)
-        self.assertEqual(args[2], "123456")
+        self.assertEqual(args[2], tg.DEFAULT_API_HASH)
         self.assertEqual(kwargs["proxy"]["addr"], "12345")
         self.assertEqual(kwargs["device_model"], "777")
         self.assertEqual(kwargs["system_version"], "888")
