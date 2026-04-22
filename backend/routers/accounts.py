@@ -123,8 +123,10 @@ def create_account(data: AccountCreate, db: Session = Depends(get_db)):
     proxy_type = (data.proxy_type or "SOCKS5").upper()
     proxy_user = data.proxy_user or None
     proxy_pass = data.proxy_pass or ""
+    proxy_source = "inline" if proxy_host and proxy_port else "none"
 
     if data.proxy_id:
+        proxy_source = "pool"
         proxy = db.query(ProxyPool).filter(ProxyPool.id == data.proxy_id).first()
         if not proxy:
             raise HTTPException(400, "Proxy not found")
@@ -134,6 +136,7 @@ def create_account(data: AccountCreate, db: Session = Depends(get_db)):
         proxy_user = proxy.username or None
         proxy_pass = proxy.password or ""
     elif proxy_pass == "__keep__":
+        proxy_source = "legacy_keep"
         proxy = None
         if proxy_host and proxy_port:
             query = db.query(ProxyPool).filter(
@@ -170,6 +173,18 @@ def create_account(data: AccountCreate, db: Session = Depends(get_db)):
     acc.lang_code = params["lang_code"]
     db.commit()
     db.refresh(acc)
+    logger.info(
+        "account_create_diag account_id=%s proxy_source=%s proxy=%s:%s/%s user=%s pass=%s app_id=%s app_hash=%s",
+        acc.id,
+        proxy_source,
+        proxy_host or "none",
+        proxy_port or "none",
+        proxy_type,
+        "yes" if proxy_user else "no",
+        "yes" if proxy_pass else "no",
+        f"{type(data.app_id).__name__}/len={len(str(data.app_id or ''))}",
+        f"{type(data.app_hash).__name__}/len={len(str(data.app_hash or ''))}",
+    )
     return {"id": acc.id, "name": acc.name, "phone": acc.phone}
 
 

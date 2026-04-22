@@ -80,6 +80,22 @@ def _decrypt_or_plain(value) -> str:
     return decrypt_value(text) or text
 
 
+def _debug_shape(value) -> str:
+    text = _as_str(value)
+    return f"{type(value).__name__}/len={len(text)}"
+
+
+def _debug_proxy_shape(proxy) -> str:
+    if not proxy:
+        return "none"
+    return (
+        f"{proxy.get('proxy_type')}@{proxy.get('addr')}:{proxy.get('port')}"
+        f" user={'yes' if proxy.get('username') else 'no'}"
+        f" pass={'yes' if proxy.get('password') else 'no'}"
+        f" rdns={proxy.get('rdns')}"
+    )
+
+
 def _build_proxy(account: Account):
     proxy_host = _as_str(getattr(account, "proxy_host", None)).strip()
     proxy_port = getattr(account, "proxy_port", None)
@@ -1199,6 +1215,15 @@ def _make_fresh_client(account: Account) -> TelegramClient:
 async def send_code_request(account: Account) -> dict:
     # Always use a fresh session for send-code — the existing session may be dead/duplicated
     client = _make_fresh_client(account)
+    logger.info(
+        "send_code_diag account_id=%s proxy=%s account_app_id=%s account_app_hash=%s client_api_id=%s client_api_hash=%s",
+        getattr(account, "id", None),
+        _debug_proxy_shape(_build_proxy(account)),
+        _debug_shape(getattr(account, "app_id", None)),
+        _debug_shape(getattr(account, "app_hash", None)),
+        _debug_shape(getattr(client, "api_id", None)),
+        _debug_shape(getattr(client, "api_hash", None)),
+    )
     try:
         await client.connect()
         result = await client.send_code_request(_as_str(account.phone))
