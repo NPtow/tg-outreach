@@ -50,6 +50,8 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 DEFAULT_API_ID = 2040
 DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
+CAMPAIGN_ENTITY_TIMEOUT_S = 20.0
+CAMPAIGN_SEND_TIMEOUT_S = 30.0
 
 _ws_broadcast = None
 _MSK_OFFSET = timedelta(hours=3)
@@ -1397,8 +1399,9 @@ async def send_manual_message(account_id: int, tg_user_id: str, conversation_id:
 # ── Campaign worker ──────────────────────────────────────────────
 
 async def start_campaign(campaign_id: int):
-    if campaign_id in _campaign_tasks:
+    if campaign_is_running(campaign_id):
         return
+    _campaign_tasks.pop(campaign_id, None)
     task = asyncio.create_task(_campaign_worker(campaign_id))
     _campaign_tasks[campaign_id] = task
 
@@ -1418,7 +1421,28 @@ async def stop_campaign(campaign_id: int):
 
 
 def campaign_is_running(campaign_id: int) -> bool:
-    return campaign_id in _campaign_tasks
+    task = _campaign_tasks.get(campaign_id)
+    return bool(task and not task.done())
+
+
+async def _await_campaign_call(campaign_id: int, target_username: str, stage: str, coro, timeout_s: float):
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout_s)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(
+            f"{stage} timeout after {timeout_s:.0f}s for @{target_username} in campaign {campaign_id}"
+        ) from exc
+
+
+def _pause_campaign_after_worker_error(campaign_id: int, error: str):
+    db = SessionLocal()
+    try:
+        campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+        if campaign and campaign.status == "running":
+            campaign.status = "paused"
+            db.commit()
+    finally:
+        db.close()
 
 
 async def preflight_and_start_campaign(campaign_id: int) -> dict:
@@ -1623,8 +1647,20 @@ async def _campaign_worker(campaign_id: int):
                 text = _apply_personalization(text, target)
 
                 try:
-                    entity = await client.get_entity(target.username)
-                    sent_message = await client.send_message(entity, text)
+                    entity = await _await_campaign_call(
+                        campaign_id,
+                        target.username,
+                        "resolve",
+                        client.get_entity(target.username),
+                        CAMPAIGN_ENTITY_TIMEOUT_S,
+                    )
+                    sent_message = await _await_campaign_call(
+                        campaign_id,
+                        target.username,
+                        "send",
+                        client.send_message(entity, text),
+                        CAMPAIGN_SEND_TIMEOUT_S,
+                    )
                     target.status = "sent"
                     target.account_id = _account_id
                     target.sent_at = datetime.utcnow()
@@ -1725,6 +1761,7 @@ async def _campaign_worker(campaign_id: int):
     except asyncio.CancelledError:
         logger.info(f"Campaign {campaign_id} worker cancelled")
     except Exception as e:
+        _pause_campaign_after_worker_error(campaign_id, str(e))
         logger.error(f"Campaign {campaign_id} worker error: {e}", exc_info=True)
     finally:
         _campaign_tasks.pop(campaign_id, None)

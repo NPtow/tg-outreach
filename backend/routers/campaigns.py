@@ -52,13 +52,14 @@ def list_campaigns(db: Session = Depends(get_db)):
                 CampaignTarget.campaign_id == c.id, CampaignTarget.status == "skipped"
             ).count()
             acc_ids = json.loads(c.account_ids) if c.account_ids else [c.account_id]
+            is_running = tg.campaign_is_running(c.id) if owns_telegram_runtime() else c.status == "running"
             result.append({
                 "id": c.id,
                 "name": c.name,
                 "account_id": c.account_id,
                 "account_ids": acc_ids,
                 "status": c.status,
-                "is_running": c.status == "running",
+                "is_running": is_running,
                 "delay_min": c.delay_min,
                 "delay_max": c.delay_max,
                 "daily_limit": c.daily_limit,

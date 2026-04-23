@@ -11,8 +11,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.database import get_db, Base
-from backend.models import Account, Conversation, Message, ProxyPool, Settings
+from backend.models import Account, Campaign, Conversation, Message, ProxyPool, Settings
 from backend.routers import accounts as accounts_router
+from backend.routers import campaigns as campaigns_router
 import backend.telegram_client as tg
 
 
@@ -24,6 +25,16 @@ class FakeEvent:
 
     async def get_sender(self):
         return self._sender
+
+
+
+
+class FakeTaskState:
+    def __init__(self, done_value):
+        self._done_value = done_value
+
+    def done(self):
+        return self._done_value
 
 
 class OutreachRuntimeTests(unittest.TestCase):
@@ -82,6 +93,93 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(kwargs["system_version"], "888")
         self.assertEqual(kwargs["app_version"], "999")
         self.assertEqual(kwargs["lang_code"], "111")
+
+    def test_campaign_is_running_requires_live_task(self):
+        tg._campaign_tasks[7] = FakeTaskState(False)
+        tg._campaign_tasks[8] = FakeTaskState(True)
+
+        self.assertTrue(tg.campaign_is_running(7))
+        self.assertFalse(tg.campaign_is_running(8))
+        self.assertFalse(tg.campaign_is_running(9))
+
+    def test_await_campaign_call_times_out_descriptively(self):
+        async def never_returns():
+            await asyncio.sleep(3600)
+
+        with self.assertRaises(TimeoutError) as ctx:
+            asyncio.run(
+                tg._await_campaign_call(
+                    campaign_id=9,
+                    target_username="stuck_target",
+                    stage="resolve",
+                    coro=never_returns(),
+                    timeout_s=0.01,
+                )
+            )
+
+        self.assertIn("resolve timeout", str(ctx.exception))
+        self.assertIn("@stuck_target", str(ctx.exception))
+
+    def test_pause_campaign_after_worker_error_sets_status_paused(self):
+        with self._db() as db:
+            db.add(
+                Campaign(
+                    id=50,
+                    name="Broken campaign",
+                    account_id=1,
+                    account_ids="[1]",
+                    messages="[]",
+                    status="running",
+                )
+            )
+            db.commit()
+
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            tg._pause_campaign_after_worker_error(50, "boom")
+
+        with self._db() as db:
+            campaign = db.query(Campaign).filter(Campaign.id == 50).first()
+
+        self.assertEqual(campaign.status, "paused")
+
+    def test_list_campaigns_reports_runtime_task_state(self):
+        with self._db() as db:
+            db.add(
+                Campaign(
+                    id=60,
+                    name="Runtime truth",
+                    account_id=1,
+                    account_ids="[1]",
+                    messages='["hi"]',
+                    status="running",
+                )
+            )
+            db.commit()
+
+        app = FastAPI()
+        app.include_router(campaigns_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            with patch("backend.routers.campaigns.owns_telegram_runtime", return_value=True):
+                with patch("backend.routers.campaigns.tg.campaign_is_running", return_value=False):
+                    response = client.get("/api/campaigns/")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(payload[0]["status"], "running")
+        self.assertFalse(payload[0]["is_running"])
 
     def test_serialize_account_returns_simple_public_status(self):
         account = Account(
