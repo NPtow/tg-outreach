@@ -166,6 +166,18 @@ class OutreachRuntimeTests(unittest.TestCase):
 
         self.assertEqual(text, "Здравствуйте, Анна! Меня зовут Никита.")
 
+    def test_personalization_preserves_message_paragraphs(self):
+        target = CampaignTarget(username="lead_user", display_name="Анна")
+        account = Account(name="Никита", phone="+573122997012", app_id="2040", app_hash="hash")
+
+        text = tg._apply_personalization(
+            "Здравствуйте, {first_name}!\n\nМеня зовут {agent_name}.",
+            target,
+            account,
+        )
+
+        self.assertEqual(text, "Здравствуйте, Анна!\n\nМеня зовут Никита.")
+
     def test_personalization_removes_dangling_first_name_punctuation_when_missing(self):
         target = CampaignTarget(username="lead_user", display_name=None)
 

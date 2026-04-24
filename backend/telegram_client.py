@@ -1839,8 +1839,8 @@ def _apply_personalization(text: str, target: CampaignTarget, account: Optional[
     }
     for placeholder, value in replacements.items():
         text = text.replace(placeholder, value)
-    text = re.sub(r"\s+([!?,.;:])", r"\1", text)
-    text = re.sub(r"\s{2,}", " ", text)
+    text = re.sub(r"[ \t]+([!?,.;:])", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
     text = text.strip()
     if removed_leading_first_name and text:
         text = text[0].upper() + text[1:]
