@@ -11,7 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.database import get_db, Base
-from backend.models import Account, Campaign, Conversation, Message, ProxyPool, Settings
+from backend.models import Account, Campaign, CampaignTarget, Conversation, Message, ProxyPool, Settings
 from backend.routers import accounts as accounts_router
 from backend.routers import campaigns as campaigns_router
 from backend.routers import proxy_pool as proxy_pool_router
@@ -115,6 +115,42 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(kwargs["system_version"], "888")
         self.assertEqual(kwargs["app_version"], "999")
         self.assertEqual(kwargs["lang_code"], "111")
+
+    def test_personalization_keeps_first_name_when_present(self):
+        target = CampaignTarget(
+            username="lead_user",
+            display_name="Иван",
+            company="Acme",
+            role="CTO",
+            custom_note="ProductConf",
+        )
+
+        text = tg._apply_personalization(
+            "Привет, {first_name}! Ты из {company}, верно?",
+            target,
+        )
+
+        self.assertEqual(text, "Привет, Иван! Ты из Acme, верно?")
+
+    def test_personalization_removes_dangling_first_name_punctuation_when_missing(self):
+        target = CampaignTarget(username="lead_user", display_name=None)
+
+        text = tg._apply_personalization(
+            "Привет, {first_name}! Хотел обсудить вопрос.",
+            target,
+        )
+
+        self.assertEqual(text, "Привет! Хотел обсудить вопрос.")
+
+    def test_personalization_removes_english_dangling_first_name_punctuation_when_missing(self):
+        target = CampaignTarget(username="lead_user", display_name=None)
+
+        text = tg._apply_personalization(
+            "Hi {first_name}, wanted to ask you something.",
+            target,
+        )
+
+        self.assertEqual(text, "Hi wanted to ask you something.")
 
     def test_campaign_is_running_requires_live_task(self):
         tg._campaign_tasks[7] = FakeTaskState(False)

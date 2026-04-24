@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import tempfile
 import time
@@ -1821,17 +1822,20 @@ def _seconds_until_window_open(hour_from: int, hour_to: int) -> int:
 
 def _apply_personalization(text: str, target: CampaignTarget) -> str:
     """Substitute all {variable} placeholders from target fields."""
+    first_name = (target.display_name or "").strip()
+    if not first_name:
+        text = re.sub(r"\s*,\s*\{first_name\}", "", text)
+        text = re.sub(r"\s+\{first_name\}\s*,?", " ", text)
     replacements = {
-        "{first_name}": target.display_name or "",
+        "{first_name}": first_name,
         "{company}": target.company or "",
         "{role}": target.role or "",
         "{note}": target.custom_note or "",
     }
     for placeholder, value in replacements.items():
         text = text.replace(placeholder, value)
-    # Clean up double spaces from empty substitutions
-    while "  " in text:
-        text = text.replace("  ", " ")
+    text = re.sub(r"\s+([!?,.;:])", r"\1", text)
+    text = re.sub(r"\s{2,}", " ", text)
     return text.strip()
 
 
