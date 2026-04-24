@@ -18,6 +18,22 @@ from backend.routers import proxy_pool as proxy_pool_router
 import backend.telegram_client as tg
 
 
+class FakeCreatedTask:
+    def __init__(self, *, done_value=False):
+        self._done_value = done_value
+        self.cancelled = False
+        self.callbacks = []
+
+    def done(self):
+        return self._done_value
+
+    def cancel(self):
+        self.cancelled = True
+
+    def add_done_callback(self, callback):
+        self.callbacks.append(callback)
+
+
 class FakeEvent:
     def __init__(self, *, sender, text, is_out=False):
         self._sender = sender
@@ -52,6 +68,11 @@ class OutreachRuntimeTests(unittest.TestCase):
     def tearDown(self):
         tg._clients.clear()
         tg._tasks.clear()
+        if hasattr(tg, "_pending_auto_reply_tasks"):
+            for task in tg._pending_auto_reply_tasks.values():
+                if not task.done():
+                    task.cancel()
+            tg._pending_auto_reply_tasks.clear()
         self.engine.dispose()
         self.tempdir.cleanup()
 
@@ -665,6 +686,170 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(messages[0].text, "У меня есть вопрос")
         self.assertEqual(conv.last_message, "У меня есть вопрос")
         self.assertEqual(conv.unread_count, 1)
+
+    def test_handle_message_schedules_auto_reply_without_generating_inline(self):
+        with self._db() as db:
+            db.add(
+                Account(
+                    id=21,
+                    name="Ana",
+                    phone="+573122997121",
+                    app_id="2040",
+                    app_hash="hash",
+                    auto_reply=True,
+                )
+            )
+            db.add(Settings(id=1, provider="openai", auto_reply_enabled=True, openai_key="sk-test", model="gpt-4o-mini"))
+            db.add(
+                Conversation(
+                    id=121,
+                    account_id=21,
+                    tg_user_id="421",
+                    tg_username="lead_user_21",
+                    tg_first_name="Lead",
+                    status="active",
+                )
+            )
+            db.commit()
+
+        sender = SimpleNamespace(
+            id=421,
+            bot=False,
+            username="lead_user_21",
+            first_name="Lead",
+            last_name="User",
+        )
+        event = FakeEvent(sender=sender, text="Когда можем созвониться?")
+
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch("backend.telegram_client._ws_broadcast", None):
+                with patch("backend.telegram_client._schedule_auto_reply", return_value=25.0, create=True) as schedule:
+                    with patch("backend.gpt_handler.generate_reply", AsyncMock(return_value="AI reply")) as generate:
+                        with patch("backend.telegram_client.send_manual_message", AsyncMock(return_value={"ok": True})) as send:
+                            asyncio.run(tg._handle_message(21, event))
+
+        with self._db() as db:
+            message = db.query(Message).filter(Message.conversation_id == 121, Message.role == "user").first()
+
+        self.assertIsNotNone(message)
+        schedule.assert_called_once_with(
+            account_id=21,
+            conversation_id=121,
+            tg_user_id="421",
+            trigger_message_id=message.id,
+        )
+        generate.assert_not_awaited()
+        send.assert_not_awaited()
+
+    def test_schedule_auto_reply_cancels_previous_pending_task(self):
+        old_task = FakeCreatedTask(done_value=False)
+        new_task = FakeCreatedTask(done_value=False)
+
+        def fake_create_task(coro):
+            coro.close()
+            return new_task
+
+        tg._pending_auto_reply_tasks[122] = old_task
+        with patch("backend.telegram_client._auto_reply_delay_seconds", return_value=12.5):
+            with patch("backend.telegram_client.asyncio.create_task", side_effect=fake_create_task):
+                delay = tg._schedule_auto_reply(22, 122, "422", 777)
+
+        self.assertEqual(delay, 12.5)
+        self.assertTrue(old_task.cancelled)
+        self.assertIs(tg._pending_auto_reply_tasks[122], new_task)
+
+    def test_run_scheduled_auto_reply_waits_then_generates_and_sends(self):
+        with self._db() as db:
+            db.add(
+                Account(
+                    id=23,
+                    name="Ana",
+                    phone="+573122997123",
+                    app_id="2040",
+                    app_hash="hash",
+                    auto_reply=True,
+                )
+            )
+            db.add(Settings(id=1, provider="openai", auto_reply_enabled=True, openai_key="sk-test", model="gpt-4o-mini"))
+            db.add(
+                Conversation(
+                    id=123,
+                    account_id=23,
+                    tg_user_id="423",
+                    tg_username="lead_user_23",
+                    tg_first_name="Lead",
+                    status="active",
+                )
+            )
+            db.add(Message(conversation_id=123, role="user", text="Расскажите подробнее"))
+            db.commit()
+            trigger_id = db.query(Message).filter(Message.conversation_id == 123).first().id
+
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch("backend.telegram_client.asyncio.sleep", AsyncMock()) as sleep:
+                with patch("backend.gpt_handler.generate_reply", AsyncMock(return_value="Конечно, расскажу.")) as generate:
+                    with patch("backend.telegram_client.send_manual_message", AsyncMock(return_value={"ok": True})) as send:
+                        asyncio.run(
+                            tg._run_scheduled_auto_reply(
+                                account_id=23,
+                                conversation_id=123,
+                                tg_user_id="423",
+                                trigger_message_id=trigger_id,
+                                delay_s=7.0,
+                                scheduled_at=tg._utcnow(),
+                            )
+                        )
+
+        sleep.assert_awaited_once_with(7.0)
+        generate.assert_awaited_once()
+        send.assert_awaited_once_with(23, "423", 123, "Конечно, расскажу.")
+
+    def test_run_scheduled_auto_reply_skips_stale_trigger_message(self):
+        with self._db() as db:
+            db.add(
+                Account(
+                    id=24,
+                    name="Ana",
+                    phone="+573122997124",
+                    app_id="2040",
+                    app_hash="hash",
+                    auto_reply=True,
+                )
+            )
+            db.add(Settings(id=1, provider="openai", auto_reply_enabled=True, openai_key="sk-test", model="gpt-4o-mini"))
+            db.add(
+                Conversation(
+                    id=124,
+                    account_id=24,
+                    tg_user_id="424",
+                    tg_username="lead_user_24",
+                    tg_first_name="Lead",
+                    status="active",
+                )
+            )
+            db.add(Message(conversation_id=124, role="user", text="Первый вопрос"))
+            db.commit()
+            old_trigger_id = db.query(Message).filter(Message.conversation_id == 124).first().id
+            db.add(Message(conversation_id=124, role="user", text="Новый вопрос"))
+            db.commit()
+
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch("backend.telegram_client.asyncio.sleep", AsyncMock()):
+                with patch("backend.gpt_handler.generate_reply", AsyncMock(return_value="AI reply")) as generate:
+                    with patch("backend.telegram_client.send_manual_message", AsyncMock(return_value={"ok": True})) as send:
+                        asyncio.run(
+                            tg._run_scheduled_auto_reply(
+                                account_id=24,
+                                conversation_id=124,
+                                tg_user_id="424",
+                                trigger_message_id=old_trigger_id,
+                                delay_s=7.0,
+                                scheduled_at=tg._utcnow(),
+                            )
+                        )
+
+        generate.assert_not_awaited()
+        send.assert_not_awaited()
 
     def test_outgoing_outreach_message_creates_conversation_immediately(self):
         with self._db() as db:

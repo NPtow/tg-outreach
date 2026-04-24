@@ -45,12 +45,16 @@ _clients: Dict[int, TelegramClient] = {}
 _tasks: Dict[int, asyncio.Task] = {}
 # campaign_id -> asyncio.Task
 _campaign_tasks: Dict[int, asyncio.Task] = {}
+# conversation_id -> asyncio.Task
+_pending_auto_reply_tasks: Dict[int, asyncio.Task] = {}
 
 SESSIONS_DIR = "sessions"
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 DEFAULT_API_ID = 2040
 DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
+AUTO_REPLY_DELAY_MIN_S = 20.0
+AUTO_REPLY_DELAY_MAX_S = 45.0
 CAMPAIGN_ENTITY_TIMEOUT_S = 20.0
 CAMPAIGN_SEND_TIMEOUT_S = 30.0
 
@@ -710,6 +714,280 @@ def _record_outreach_message(
     return message
 
 
+def _auto_reply_delay_seconds() -> float:
+    return random.uniform(AUTO_REPLY_DELAY_MIN_S, AUTO_REPLY_DELAY_MAX_S)
+
+
+def _log_auto_reply_event(event: str, **fields):
+    parts = []
+    for key, value in fields.items():
+        if isinstance(value, float):
+            rendered = f"{value:.2f}"
+        elif isinstance(value, datetime):
+            rendered = value.isoformat()
+        else:
+            rendered = _as_str(value)
+        parts.append(f"{key}={rendered}")
+    logger.info("auto_reply_%s %s", event, " ".join(parts))
+
+
+def _latest_user_message_id(db, conversation_id: int) -> Optional[int]:
+    row = (
+        db.query(Message.id)
+        .filter(Message.conversation_id == conversation_id, Message.role == "user")
+        .order_by(Message.id.desc())
+        .first()
+    )
+    return row[0] if row else None
+
+
+def _load_auto_reply_context(db, account_id: int, conversation_id: int, trigger_message_id: int) -> Optional[dict]:
+    settings = db.query(Settings).filter(Settings.id == 1).first()
+    account = db.query(Account).filter(Account.id == account_id).first()
+    conv = db.query(Conversation).filter(
+        Conversation.id == conversation_id,
+        Conversation.account_id == account_id,
+    ).first()
+
+    if not settings or not account or not conv:
+        return None
+    if conv.status != "active":
+        return None
+    if not account.auto_reply or not settings.auto_reply_enabled:
+        return None
+    if _latest_user_message_id(db, conversation_id) != trigger_message_id:
+        return None
+
+    provider = getattr(settings, "provider", "openai") or "openai"
+    openai_key = decrypt_value(settings.openai_key) if settings else ""
+    anthropic_key = decrypt_value(getattr(settings, "anthropic_key", "")) if settings else ""
+    if provider in ("openai", "openrouter") and not openai_key:
+        return None
+    if provider == "anthropic" and not anthropic_key:
+        return None
+
+    source_campaign = None
+    if conv.source_campaign_id:
+        source_campaign = db.query(Campaign).filter(Campaign.id == conv.source_campaign_id).first()
+        if source_campaign and source_campaign.max_messages:
+            assistant_count = db.query(Message).filter(
+                Message.conversation_id == conv.id,
+                Message.role == "assistant",
+            ).count()
+            if assistant_count >= source_campaign.max_messages:
+                return None
+        if source_campaign and source_campaign.prompt_template_id:
+            from backend.models import PromptTemplate
+            source_campaign.prompt_template = db.query(PromptTemplate).filter(
+                PromptTemplate.id == source_campaign.prompt_template_id
+            ).first()
+
+    if account.prompt_template_id:
+        from backend.models import PromptTemplate
+        account.prompt_template = db.query(PromptTemplate).filter(
+            PromptTemplate.id == account.prompt_template_id
+        ).first()
+
+    history = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(settings.context_messages)
+        .all()
+    )
+    history = list(reversed(history))
+
+    return {
+        "settings": settings,
+        "account": account,
+        "conversation": conv,
+        "provider": provider,
+        "openai_key": openai_key or "",
+        "anthropic_key": anthropic_key or "",
+        "source_campaign": source_campaign,
+        "history": history,
+    }
+
+
+def _schedule_auto_reply(account_id: int, conversation_id: int, tg_user_id: str, trigger_message_id: int) -> float:
+    pending = _pending_auto_reply_tasks.get(conversation_id)
+    if pending and not pending.done():
+        pending.cancel()
+        _log_auto_reply_event(
+            "cancelled",
+            account_id=account_id,
+            conversation_id=conversation_id,
+            trigger_message_id=getattr(pending, "trigger_message_id", ""),
+            replacement_trigger_message_id=trigger_message_id,
+            cancelled_at=_utcnow(),
+        )
+
+    scheduled_at = _utcnow()
+    delay_s = _auto_reply_delay_seconds()
+    send_after_at = scheduled_at + timedelta(seconds=delay_s)
+    task = asyncio.create_task(
+        _run_scheduled_auto_reply(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            tg_user_id=tg_user_id,
+            trigger_message_id=trigger_message_id,
+            delay_s=delay_s,
+            scheduled_at=scheduled_at,
+        )
+    )
+    task.trigger_message_id = trigger_message_id
+    _pending_auto_reply_tasks[conversation_id] = task
+
+    def _cleanup(done_task):
+        if _pending_auto_reply_tasks.get(conversation_id) is done_task:
+            _pending_auto_reply_tasks.pop(conversation_id, None)
+
+    task.add_done_callback(_cleanup)
+    _log_auto_reply_event(
+        "scheduled",
+        account_id=account_id,
+        conversation_id=conversation_id,
+        trigger_message_id=trigger_message_id,
+        delay_s=delay_s,
+        scheduled_at=scheduled_at,
+        send_after_at=send_after_at,
+    )
+    return delay_s
+
+
+async def _run_scheduled_auto_reply(
+    account_id: int,
+    conversation_id: int,
+    tg_user_id: str,
+    trigger_message_id: int,
+    delay_s: float,
+    scheduled_at: datetime,
+):
+    try:
+        await asyncio.sleep(delay_s)
+
+        db = SessionLocal()
+        try:
+            context = _load_auto_reply_context(db, account_id, conversation_id, trigger_message_id)
+        finally:
+            db.close()
+        if not context:
+            _log_auto_reply_event(
+                "skipped",
+                account_id=account_id,
+                conversation_id=conversation_id,
+                trigger_message_id=trigger_message_id,
+                reason="context_invalid_after_delay",
+                scheduled_at=scheduled_at,
+                skipped_at=_utcnow(),
+            )
+            return
+
+        system_prompt = _resolve_prompt(
+            context["settings"],
+            context["account"],
+            context["source_campaign"],
+        )
+
+        from backend.gpt_handler import generate_reply
+
+        reply = await generate_reply(
+            provider=context["provider"],
+            openai_key=context["openai_key"],
+            anthropic_key=context["anthropic_key"],
+            base_url=getattr(context["settings"], "base_url", "") or "",
+            model=context["settings"].model,
+            system_prompt=system_prompt,
+            history=context["history"],
+        )
+        if not reply:
+            _log_auto_reply_event(
+                "skipped",
+                account_id=account_id,
+                conversation_id=conversation_id,
+                trigger_message_id=trigger_message_id,
+                reason="empty_reply",
+                scheduled_at=scheduled_at,
+                skipped_at=_utcnow(),
+            )
+            await _emit_runtime_note(
+                "auto_reply_skipped",
+                account_id=account_id,
+                conversation_id=conversation_id,
+                reason="AI не вернул ответ",
+            )
+            return
+
+        db = SessionLocal()
+        try:
+            if not _load_auto_reply_context(db, account_id, conversation_id, trigger_message_id):
+                _log_auto_reply_event(
+                    "skipped",
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    trigger_message_id=trigger_message_id,
+                    reason="stale_or_disabled_before_send",
+                    scheduled_at=scheduled_at,
+                    skipped_at=_utcnow(),
+                )
+                return
+        finally:
+            db.close()
+
+        sending_at = _utcnow()
+        _log_auto_reply_event(
+            "sending",
+            account_id=account_id,
+            conversation_id=conversation_id,
+            trigger_message_id=trigger_message_id,
+            delay_s=delay_s,
+            scheduled_at=scheduled_at,
+            sending_at=sending_at,
+        )
+        send_result = await send_manual_message(account_id, tg_user_id, conversation_id, reply)
+        if not send_result.get("ok"):
+            _log_auto_reply_event(
+                "skipped",
+                account_id=account_id,
+                conversation_id=conversation_id,
+                trigger_message_id=trigger_message_id,
+                reason=send_result.get("error") or "send_failed",
+                scheduled_at=scheduled_at,
+                skipped_at=_utcnow(),
+            )
+            await _emit_runtime_note(
+                "auto_reply_skipped",
+                account_id=account_id,
+                conversation_id=conversation_id,
+                reason=send_result.get("error") or "Не удалось отправить AI-ответ",
+            )
+            return
+
+        _log_auto_reply_event(
+            "sent",
+            account_id=account_id,
+            conversation_id=conversation_id,
+            trigger_message_id=trigger_message_id,
+            delay_s=delay_s,
+            scheduled_at=scheduled_at,
+            sending_at=sending_at,
+            sent_at=_utcnow(),
+            waited_s=(sending_at - scheduled_at).total_seconds(),
+        )
+    except asyncio.CancelledError:
+        _log_auto_reply_event(
+            "cancelled",
+            account_id=account_id,
+            conversation_id=conversation_id,
+            trigger_message_id=trigger_message_id,
+            scheduled_at=scheduled_at,
+            cancelled_at=_utcnow(),
+        )
+        raise
+    except Exception as exc:
+        logger.error("Scheduled auto-reply failed for conversation %s: %s", conversation_id, exc, exc_info=True)
+
+
 async def _handle_message(account_id: int, event):
     if getattr(event, "is_out", None) or getattr(getattr(event, "message", None), "out", False):
         return
@@ -766,7 +1044,7 @@ async def _handle_message(account_id: int, event):
             ).first()
 
         # ── Save incoming message ──
-        _record_outreach_message(db, conversation=conv, role="user", text=text, increment_unread=True)
+        incoming_message = _record_outreach_message(db, conversation=conv, role="user", text=text, increment_unread=True)
 
         # ── Check stop keywords ──
         if source_campaign and source_campaign.stop_keywords:
@@ -836,50 +1114,12 @@ async def _handle_message(account_id: int, event):
             await _emit_runtime_note("auto_reply_skipped", account_id=account_id, conversation_id=conv.id, reason="Anthropic key не настроен")
             return
 
-        # ── Load history and resolve prompt ──
-        history = db.query(Message).filter(
-            Message.conversation_id == conv.id
-        ).order_by(Message.created_at.desc()).limit(settings.context_messages).all()
-        history = list(reversed(history))
-
-        # Eagerly load prompt templates for resolution
-        db.expire_all()
-        account = db.query(Account).filter(Account.id == account_id).first()
-        if source_campaign and source_campaign.prompt_template_id:
-            from backend.models import PromptTemplate
-            source_campaign.prompt_template = db.query(PromptTemplate).filter(
-                PromptTemplate.id == source_campaign.prompt_template_id
-            ).first()
-        if account.prompt_template_id:
-            from backend.models import PromptTemplate
-            account.prompt_template = db.query(PromptTemplate).filter(
-                PromptTemplate.id == account.prompt_template_id
-            ).first()
-
-        system_prompt = _resolve_prompt(settings, account, source_campaign)
-
-        from backend.gpt_handler import generate_reply
-        reply = await generate_reply(
-            provider=getattr(settings, "provider", "openai") or "openai",
-            openai_key=openai_key or "",
-            anthropic_key=anthropic_key or "",
-            base_url=getattr(settings, "base_url", "") or "",
-            model=settings.model,
-            system_prompt=system_prompt,
-            history=history,
+        _schedule_auto_reply(
+            account_id=account_id,
+            conversation_id=conv.id,
+            tg_user_id=tg_user_id,
+            trigger_message_id=incoming_message.id,
         )
-
-        if reply:
-            send_result = await send_manual_message(account_id, tg_user_id, conv.id, reply)
-            if not send_result.get("ok"):
-                await _emit_runtime_note(
-                    "auto_reply_skipped",
-                    account_id=account_id,
-                    conversation_id=conv.id,
-                    reason=send_result.get("error") or "Не удалось отправить AI-ответ",
-                )
-        else:
-            await _emit_runtime_note("auto_reply_skipped", account_id=account_id, conversation_id=conv.id, reason="AI не вернул ответ")
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)
     finally:
