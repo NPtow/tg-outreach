@@ -32,6 +32,13 @@ const PROVIDERS = [
 ];
 
 const OPENAI_MODELS = [
+  { value: "gpt-5.5", label: "GPT-5.5", note: "API access may require availability" },
+  { value: "gpt-5.4-mini", label: "GPT-5.4 mini" },
+  { value: "gpt-5.4-nano", label: "GPT-5.4 nano" },
+  { value: "gpt-5.2", label: "GPT-5.2" },
+  { value: "gpt-5.2-pro", label: "GPT-5.2 Pro" },
+  { value: "gpt-5.1", label: "GPT-5.1" },
+  { value: "gpt-5-mini", label: "GPT-5 mini" },
   { value: "gpt-4o-mini", label: "gpt-4o-mini" },
   { value: "gpt-4o", label: "gpt-4o" },
   { value: "gpt-4-turbo", label: "gpt-4-turbo" },
@@ -98,6 +105,7 @@ export default function Settings() {
 
   const isLocal = form.provider === "ollama" || form.provider === "lmstudio";
   const defaultBaseUrl = form.provider === "ollama" ? "http://localhost:11434/v1" : "http://localhost:1234/v1";
+  const isKnownOpenAIModel = OPENAI_MODELS.some((m) => m.value === form.model);
 
   if (loading) return <div className="p-8 text-zinc-500 text-sm">Загрузка...</div>;
 
@@ -128,9 +136,30 @@ export default function Settings() {
               onClear={() => setForm((f) => ({ ...f, openai_key: "", clear_openai_key: true, openai_key_configured: false }))}
             />
             <Field label="Модель">
-              <select className={inputCls} value={form.model} onChange={(e) => set("model", e.target.value)}>
-                {OPENAI_MODELS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+              <select
+                className={inputCls}
+                value={isKnownOpenAIModel ? form.model : "__custom__"}
+                onChange={(e) => {
+                  if (e.target.value === "__custom__") return;
+                  set("model", e.target.value);
+                }}
+              >
+                {OPENAI_MODELS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}{m.note ? ` — ${m.note}` : ""}
+                  </option>
+                ))}
+                <option value="__custom__">Custom model id...</option>
               </select>
+              <input
+                className={`${inputCls} mt-2 font-mono text-xs`}
+                placeholder="например: gpt-5.4-mini"
+                value={form.model}
+                onChange={(e) => set("model", e.target.value)}
+              />
+              <p className="mt-1.5 text-[11px] text-zinc-600">
+                Dropdown — быстрый выбор, поле ниже сохраняет точный model id для API.
+              </p>
             </Field>
           </>
         )}
