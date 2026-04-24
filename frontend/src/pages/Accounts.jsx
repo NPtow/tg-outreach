@@ -166,7 +166,7 @@ function AddAccountModal({ onClose, onAdded }) {
               <option value="">— без прокси —</option>
               {proxies.map(p => (
                 <option key={p.id} value={p.id}>
-                  {p.host}:{p.port}{p.username ? ` (${p.username})` : ""}{p.used_by ? ` — занят: ${p.used_by}` : ""}
+                  {p.proxy_type || "AUTO"} {p.host}:{p.port}{p.username ? ` (${p.username})` : ""}{p.used_by ? ` — занят: ${p.used_by}` : ""}
                 </option>
               ))}
             </select>

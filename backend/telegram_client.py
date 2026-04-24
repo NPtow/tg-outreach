@@ -32,8 +32,9 @@ from telethon.tl.types import User
 from backend.database import SessionLocal
 from backend.models import (
     Account, Campaign, CampaignTarget, Conversation,
-    DoNotContact, Message, Settings,
+    DoNotContact, Message, ProxyPool, Settings,
 )
+from backend.proxy_utils import detect_proxy_type, normalize_proxy_type, telethon_proxy_type
 from backend.security import decrypt_value, encrypt_value, has_secret
 
 logger = logging.getLogger(__name__)
@@ -111,11 +112,10 @@ def _build_proxy(account: Account):
     proxy_port = getattr(account, "proxy_port", None)
     if not proxy_host or not proxy_port:
         return None
-    type_map = {"HTTP": "http", "SOCKS5": "socks5", "SOCKS4": "socks4"}
     proxy_user = _as_str(getattr(account, "proxy_user", None)).strip() or None
     proxy_pass = _decrypt_or_plain(getattr(account, "proxy_pass", None)) or None
     return {
-        "proxy_type": type_map.get(_as_str(getattr(account, "proxy_type", None), "SOCKS5").upper(), "socks5"),
+        "proxy_type": telethon_proxy_type(getattr(account, "proxy_type", None)),
         "addr": proxy_host,
         "port": int(proxy_port),
         "username": proxy_user,
@@ -432,6 +432,37 @@ async def _public_username_exists(username: Optional[str]) -> Optional[bool]:
         return None
 
 
+def _persist_detected_proxy_type(account_id: int, proxy_type: str) -> None:
+    db = SessionLocal()
+    try:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        if not acc:
+            return
+        detected_type = normalize_proxy_type(proxy_type)
+        changed = False
+        if (acc.proxy_type or "").upper() != detected_type:
+            acc.proxy_type = detected_type
+            changed = True
+
+        if acc.proxy_host and acc.proxy_port:
+            proxy_query = db.query(ProxyPool).filter(
+                ProxyPool.host == acc.proxy_host,
+                ProxyPool.port == int(acc.proxy_port),
+            )
+            if acc.proxy_user:
+                proxy_query = proxy_query.filter(ProxyPool.username == acc.proxy_user)
+            for proxy in proxy_query.all():
+                if (proxy.proxy_type or "").upper() != detected_type:
+                    proxy.proxy_type = detected_type
+                    changed = True
+
+        if changed:
+            db.commit()
+            logger.info("proxy_type_autodetect account_id=%s detected_type=%s", account_id, detected_type)
+    finally:
+        db.close()
+
+
 async def _proxy_connectivity_check(account: Account) -> dict:
     started = time.perf_counter()
     target_host = "149.154.167.50"
@@ -440,35 +471,55 @@ async def _proxy_connectivity_check(account: Account) -> dict:
         proxy_host = _as_str(getattr(account, "proxy_host", None)).strip()
         proxy_port = getattr(account, "proxy_port", None)
         if proxy_host and proxy_port:
-            from python_socks import ProxyType
-            from python_socks.async_.asyncio import Proxy
-
-            type_map = {
-                "SOCKS5": ProxyType.SOCKS5,
-                "SOCKS4": ProxyType.SOCKS4,
-                "HTTP": ProxyType.HTTP,
-            }
-            proxy = Proxy.create(
-                proxy_type=type_map.get(_as_str(getattr(account, "proxy_type", None), "SOCKS5").upper(), ProxyType.SOCKS5),
+            detected = await detect_proxy_type(
                 host=proxy_host,
                 port=int(proxy_port),
                 username=_as_str(getattr(account, "proxy_user", None)).strip() or None,
                 password=_decrypt_or_plain(getattr(account, "proxy_pass", None)) or None,
+                preferred_type=_as_str(getattr(account, "proxy_type", None), "SOCKS5"),
             )
-            sock = await asyncio.wait_for(proxy.connect(dest_host=target_host, dest_port=target_port), timeout=10)
-            sock.close()
+            if not detected.get("ok"):
+                attempts = detected.get("attempts", [])
+                timed_out = any(attempt.get("error_type") == "TimeoutError" for attempt in attempts)
+                message = ", ".join(
+                    f"{attempt.get('proxy_type')}={attempt.get('error_type') or 'failed'}"
+                    for attempt in attempts
+                ) or "Proxy connection failed"
+                state = _mark_error(
+                    account.id,
+                    "PROXY_TIMEOUT" if timed_out else "PROXY_FAILED",
+                    message,
+                    proxy_state="timeout" if timed_out else "failed",
+                    last_proxy_check_at=_utcnow(),
+                )
+                return {
+                    "ok": False,
+                    "proxy_state": "timeout" if timed_out else "failed",
+                    "error": message,
+                    "state": state,
+                }
+            if detected.get("proxy_type"):
+                account.proxy_type = detected["proxy_type"]
+                _persist_detected_proxy_type(account.id, detected["proxy_type"])
+            rtt_ms = int(detected.get("rtt_ms") or (time.perf_counter() - started) * 1000)
         else:
             reader, writer = await asyncio.wait_for(asyncio.open_connection(target_host, target_port), timeout=10)
             writer.close()
             await writer.wait_closed()
-        rtt_ms = int((time.perf_counter() - started) * 1000)
+            rtt_ms = int((time.perf_counter() - started) * 1000)
         state = _clear_error(
             account.id,
             proxy_state="ok",
             last_proxy_check_at=_utcnow(),
             proxy_last_rtt_ms=rtt_ms,
         )
-        return {"ok": True, "proxy_state": "ok", "rtt_ms": rtt_ms, "state": state}
+        return {
+            "ok": True,
+            "proxy_state": "ok",
+            "rtt_ms": rtt_ms,
+            "state": state,
+            "detected_proxy_type": getattr(account, "proxy_type", None),
+        }
     except asyncio.TimeoutError:
         state = _mark_error(
             account.id,
@@ -528,6 +579,7 @@ async def proxy_test_account(account_id: int) -> dict:
         "proxy_state": result.get("proxy_state", "unknown"),
         "rtt_ms": result.get("rtt_ms"),
         "error": result.get("error"),
+        "detected_proxy_type": result.get("detected_proxy_type"),
         "account": get_public_account(account_id),
     }
 
@@ -1251,6 +1303,10 @@ def _make_fresh_client(account: Account) -> TelegramClient:
 
 async def send_code_request(account: Account) -> dict:
     # Always use a fresh session for send-code — the existing session may be dead/duplicated
+    proxy_result = await _proxy_connectivity_check(account)
+    if not proxy_result.get("ok"):
+        return {"ok": False, "error": proxy_result.get("error") or "Proxy connection failed", "proxy": proxy_result}
+
     client = _make_fresh_client(account)
     logger.info(
         "send_code_diag account_id=%s proxy=%s account_app_id=%s account_app_hash=%s client_api_id=%s client_api_hash=%s",

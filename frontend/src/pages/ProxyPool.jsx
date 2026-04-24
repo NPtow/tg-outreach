@@ -33,7 +33,7 @@ export default function ProxyPool() {
       <PageHeader
         eyebrow="Infrastructure"
         title="Proxy Pool"
-        description="Один прокси на один аккаунт. Добавляй в формате host:port или host:port:user:pass"
+        description="Один прокси на один аккаунт. Тип определяется автоматически; можно явно указать HTTP:host:port:user:pass"
         stats={[
           { label: "Proxies", value: proxies.length, tone: proxies.length ? "blue" : "neutral", caption: "In pool" },
           { label: "In use", value: proxies.filter(p => p.used_by).length, tone: "neutral", caption: "Assigned to accounts" },
@@ -47,7 +47,7 @@ export default function ProxyPool() {
         <div className="flex gap-2">
           <input
             className="flex-1 bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 font-mono"
-            placeholder="82.39.223.11:18184:user:pass  или  82.39.223.11:18184"
+            placeholder="82.39.223.11:18184:user:pass  или  HTTP:82.39.223.11:18184:user:pass"
             value={line}
             onChange={e => setLine(e.target.value)}
             onKeyDown={e => e.key === "Enter" && handleAdd()}
@@ -58,7 +58,7 @@ export default function ProxyPool() {
         </div>
         {error && <p className="text-red-400 text-xs mt-2">{error}</p>}
         <p className="text-[11px] text-zinc-600 mt-2">
-          Форматы: <span className="font-mono text-zinc-500">host:port</span> или <span className="font-mono text-zinc-500">host:port:user:pass</span>
+          Форматы: <span className="font-mono text-zinc-500">host:port</span>, <span className="font-mono text-zinc-500">host:port:user:pass</span> или <span className="font-mono text-zinc-500">HTTP:host:port:user:pass</span>
         </p>
       </Surface>
 
@@ -71,6 +71,7 @@ export default function ProxyPool() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-sm text-zinc-100">{p.host}:{p.port}</span>
+                  <span className="text-xs bg-zinc-800 text-zinc-400 px-1.5 py-0.5 rounded font-mono">{p.proxy_type || "AUTO"}</span>
                   {p.username && <span className="text-xs text-zinc-500 font-mono">{p.username}</span>}
                   {p.has_password && <span className="text-xs text-zinc-600">🔐</span>}
                 </div>

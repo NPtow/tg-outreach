@@ -14,6 +14,7 @@ from backend.database import get_db, Base
 from backend.models import Account, Campaign, Conversation, Message, ProxyPool, Settings
 from backend.routers import accounts as accounts_router
 from backend.routers import campaigns as campaigns_router
+from backend.routers import proxy_pool as proxy_pool_router
 import backend.telegram_client as tg
 
 
@@ -445,6 +446,119 @@ class OutreachRuntimeTests(unittest.TestCase):
         with self._db() as db:
             account = db.query(Account).filter(Account.phone == "+573122997093").first()
             self.assertEqual(account.proxy_pass, "z4a6tw")
+
+    def test_proxy_pool_autodetects_type_when_line_omits_type(self):
+        app = FastAPI()
+        app.include_router(proxy_pool_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            with patch(
+                "backend.routers.proxy_pool.detect_proxy_type",
+                AsyncMock(return_value={"ok": True, "proxy_type": "HTTP", "rtt_ms": 42, "attempts": []}),
+            ) as detect:
+                response = client.post(
+                    "/api/proxy-pool/",
+                    json={"line": "82.39.223.11:8184:user397647:z4a6tw"},
+                )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["proxy_type"], "HTTP")
+            detect.assert_awaited_once()
+            self.assertIsNone(detect.await_args.kwargs["preferred_type"])
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        with self._db() as db:
+            proxy = db.query(ProxyPool).filter(ProxyPool.host == "82.39.223.11").first()
+            self.assertEqual(proxy.proxy_type, "HTTP")
+
+    def test_proxy_pool_type_prefix_is_used_as_detection_preference(self):
+        app = FastAPI()
+        app.include_router(proxy_pool_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            with patch(
+                "backend.routers.proxy_pool.detect_proxy_type",
+                AsyncMock(return_value={"ok": True, "proxy_type": "HTTP", "rtt_ms": 42, "attempts": []}),
+            ) as detect:
+                response = client.post(
+                    "/api/proxy-pool/",
+                    json={"line": "HTTP:82.39.223.11:8184:user397647:z4a6tw"},
+                )
+            self.assertEqual(response.status_code, 200)
+            detect.assert_awaited_once()
+            self.assertEqual(detect.await_args.kwargs["preferred_type"], "HTTP")
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+    def test_proxy_connectivity_check_persists_detected_type_for_account_and_pool(self):
+        with self._db() as db:
+            db.add(
+                ProxyPool(
+                    host="79.175.96.142",
+                    port=8184,
+                    proxy_type="SOCKS5",
+                    username="user397647",
+                    password="z4a6tw",
+                )
+            )
+            db.add(
+                Account(
+                    id=70,
+                    name="Proxy Account",
+                    phone="+573122997170",
+                    app_id="2040",
+                    app_hash="hash",
+                    proxy_host="79.175.96.142",
+                    proxy_port=8184,
+                    proxy_type="SOCKS5",
+                    proxy_user="user397647",
+                    proxy_pass="z4a6tw",
+                )
+            )
+            db.commit()
+
+        account = SimpleNamespace(
+            id=70,
+            proxy_host="79.175.96.142",
+            proxy_port=8184,
+            proxy_type="SOCKS5",
+            proxy_user="user397647",
+            proxy_pass="z4a6tw",
+        )
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch(
+                "backend.telegram_client.detect_proxy_type",
+                AsyncMock(return_value={"ok": True, "proxy_type": "HTTP", "rtt_ms": 31, "attempts": []}),
+            ):
+                result = asyncio.run(tg._proxy_connectivity_check(account))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["detected_proxy_type"], "HTTP")
+        with self._db() as db:
+            stored_account = db.query(Account).filter(Account.id == 70).first()
+            stored_proxy = db.query(ProxyPool).filter(ProxyPool.host == "79.175.96.142").first()
+            self.assertEqual(stored_account.proxy_type, "HTTP")
+            self.assertEqual(stored_proxy.proxy_type, "HTTP")
 
     def test_handle_message_persists_incoming_even_when_auto_reply_is_disabled(self):
         with self._db() as db:
