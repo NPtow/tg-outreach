@@ -4,5 +4,6 @@ __pycache__/
 *.session
 sessions/
 tg_outreach.db
+tg_outreach_*.db
 .env
 frontend/node_modules/

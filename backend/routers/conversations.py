@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from backend.database import get_db
+from backend.meeting_scheduler import book_meeting_for_conversation
 from backend.models import Campaign, Conversation, Message, Account
 from backend.runtime_config import owns_telegram_runtime
 from backend.worker_client import forward_to_worker
@@ -129,6 +130,14 @@ async def send_message(conv_id: int, data: SendMessageRequest, db: Session = Dep
     if not result.get("ok"):
         raise HTTPException(400, result)
     return {"ok": True}
+
+
+@router.post("/{conv_id}/schedule-meeting")
+async def schedule_meeting(conv_id: int, db: Session = Depends(get_db)):
+    conv = db.query(Conversation).filter(Conversation.id == conv_id).first()
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+    return await book_meeting_for_conversation(db, conv_id)
 
 
 @router.patch("/{conv_id}/status")

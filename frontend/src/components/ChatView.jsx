@@ -30,6 +30,7 @@ export default function ChatView({ convId, onClose, onStatusChange }) {
   const [data, setData] = useState(null);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [scheduling, setScheduling] = useState(false);
   const bottomRef = useRef(null);
 
   const load = () => api.getMessages(convId).then(setData);
@@ -45,6 +46,15 @@ export default function ChatView({ convId, onClose, onStatusChange }) {
   };
 
   const handleStatus = async (s) => { await api.updateStatus(convId, s); load(); onStatusChange?.(); };
+  const handleScheduleMeeting = async () => {
+    setScheduling(true);
+    try {
+      const result = await api.scheduleMeeting(convId);
+      if (result?.reply_text) setText(result.reply_text);
+    } finally {
+      setScheduling(false);
+    }
+  };
 
   if (!data) return (
     <div className="flex items-center justify-center h-full text-zinc-500 text-sm">Загрузка...</div>
@@ -69,6 +79,13 @@ export default function ChatView({ convId, onClose, onStatusChange }) {
           </div>
         </div>
         <div className="ml-4 flex items-center gap-1.5">
+          <button
+            onClick={handleScheduleMeeting}
+            disabled={scheduling}
+            className="rounded-xl border border-sky-400/20 bg-sky-400/10 px-2.5 py-1.5 text-xs font-medium text-sky-200 transition-colors hover:bg-sky-400/15 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {scheduling ? "Booking..." : "Book meeting"}
+          </button>
           {STATUS_BTNS.map(b => (
             <button key={b.key} onClick={() => handleStatus(b.key)}
               className={`rounded-xl px-2.5 py-1.5 text-xs font-medium transition-colors ${

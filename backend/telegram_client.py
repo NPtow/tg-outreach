@@ -31,6 +31,12 @@ from telethon.sessions import StringSession
 from telethon.tl.types import User
 
 from backend.database import SessionLocal
+from backend.meeting_scheduler import (
+    append_meeting_booking_instructions,
+    book_meeting_for_conversation,
+    extract_meeting_booking_intent,
+    maybe_book_meeting_from_reply,
+)
 from backend.models import (
     Account, Campaign, CampaignTarget, Conversation,
     DoNotContact, Message, ProxyPool, Settings,
@@ -889,6 +895,7 @@ async def _run_scheduled_auto_reply(
             context["account"],
             context["source_campaign"],
         )
+        system_prompt = append_meeting_booking_instructions(system_prompt)
 
         from backend.gpt_handler import generate_reply
 
@@ -932,6 +939,32 @@ async def _run_scheduled_auto_reply(
                     skipped_at=_utcnow(),
                 )
                 return
+            try:
+                reply, meeting = await maybe_book_meeting_from_reply(db, conversation_id, reply)
+                if meeting:
+                    _log_auto_reply_event(
+                        "meeting_booked",
+                        account_id=account_id,
+                        conversation_id=conversation_id,
+                        meeting_id=meeting.get("meeting_id"),
+                        zoom_join_url=meeting.get("zoom_join_url"),
+                        scheduled_at=meeting.get("start"),
+                    )
+            except Exception as exc:
+                clean_reply, wanted_booking = extract_meeting_booking_intent(reply)
+                if wanted_booking:
+                    reply = (
+                        f"{clean_reply}\n\n"
+                        "Сейчас проверю свободное время и вернусь со ссылкой на встречу."
+                    ).strip()
+                    _log_auto_reply_event(
+                        "meeting_booking_failed",
+                        account_id=account_id,
+                        conversation_id=conversation_id,
+                        reason=str(exc),
+                    )
+                else:
+                    raise
         finally:
             db.close()
 

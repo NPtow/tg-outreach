@@ -66,6 +66,7 @@ export const api = {
   },
   getMessages: (id) => req("GET", `/api/conversations/${id}/messages`),
   sendMessage: (id, text) => req("POST", `/api/conversations/${id}/send`, { text }),
+  scheduleMeeting: (id) => req("POST", `/api/conversations/${id}/schedule-meeting`),
   updateStatus: (id, status) => req("PATCH", `/api/conversations/${id}/status`, { status }),
   markRead: (id) => req("POST", `/api/conversations/${id}/mark-read`),
   toggleHot: (id) => req("PATCH", `/api/conversations/${id}/hot`),

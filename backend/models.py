@@ -22,6 +22,22 @@ class ProxyPool(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Integration(Base):
+    """OAuth/API credentials for external services such as Google Calendar."""
+    __tablename__ = "integrations"
+
+    id = Column(Integer, primary_key=True)
+    provider = Column(String(50), unique=True, nullable=False)
+    account_email = Column(String(200), nullable=True)
+    access_token = Column(Text, nullable=True)
+    refresh_token = Column(Text, nullable=True)
+    token_type = Column(String(50), nullable=True)
+    scope = Column(Text, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 class PromptTemplate(Base):
     """Reusable GPT prompt presets. Assigned per-account or per-campaign."""
     __tablename__ = "prompt_templates"
@@ -121,6 +137,24 @@ class Message(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     conversation = relationship("Conversation", back_populates="messages")
+
+
+class ScheduledMeeting(Base):
+    """Calendar/Zoom meeting booked for a Telegram conversation."""
+    __tablename__ = "scheduled_meetings"
+
+    id = Column(Integer, primary_key=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False, index=True)
+    status = Column(String(30), default="scheduled")
+    scheduled_start = Column(DateTime, nullable=False)
+    scheduled_end = Column(DateTime, nullable=False)
+    timezone = Column(String(50), default="Europe/Moscow")
+    calendar_event_id = Column(String(200), nullable=True)
+    calendar_html_link = Column(Text, nullable=True)
+    zoom_meeting_id = Column(String(100), nullable=True)
+    zoom_join_url = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class ContactBatch(Base):

@@ -1,20 +1,36 @@
 import asyncio
+import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.database import get_db, Base
-from backend.models import Account, Campaign, CampaignTarget, Conversation, Message, PromptTemplate, ProxyPool, Settings
+from backend.meeting_scheduler import (
+    BOOK_MEETING_MARKER,
+    append_meeting_booking_instructions,
+    book_meeting_for_conversation,
+    build_meeting_reply_text,
+    extract_meeting_booking_intent,
+    get_existing_scheduled_meeting,
+)
+from backend.models import Account, Campaign, CampaignTarget, Conversation, Message, PromptTemplate, ProxyPool, ScheduledMeeting, Settings
 from backend.routers import accounts as accounts_router
 from backend.routers import campaigns as campaigns_router
+from backend.routers import conversations as conversations_router
 from backend.routers import proxy_pool as proxy_pool_router
+from backend.google_calendar import build_calendar_event_description, build_google_auth_url, find_first_free_slot
+from backend.zoom_meetings import build_zoom_meeting_payload, zoom_host_user
 import backend.telegram_client as tg
 
 
@@ -252,6 +268,294 @@ class OutreachRuntimeTests(unittest.TestCase):
             campaign = db.query(Campaign).filter(Campaign.id == 50).first()
 
         self.assertEqual(campaign.status, "paused")
+
+    def test_google_oauth_url_uses_calendar_scopes_and_redirect(self):
+        env = {
+            "GOOGLE_CLIENT_ID": "client-id.apps.googleusercontent.com",
+            "GOOGLE_CLIENT_SECRET": "client-secret",
+            "GOOGLE_REDIRECT_URI": "http://127.0.0.1:8010/api/integrations/google/callback",
+            "GOOGLE_OAUTH_STATE_SECRET": "state-secret",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            url = build_google_auth_url()
+
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        self.assertEqual(parsed.scheme, "https")
+        self.assertEqual(parsed.netloc, "accounts.google.com")
+        self.assertEqual(params["client_id"], ["client-id.apps.googleusercontent.com"])
+        self.assertEqual(params["redirect_uri"], ["http://127.0.0.1:8010/api/integrations/google/callback"])
+        self.assertEqual(params["response_type"], ["code"])
+        self.assertEqual(params["access_type"], ["offline"])
+        self.assertEqual(params["prompt"], ["consent"])
+        scopes = set(params["scope"][0].split())
+        self.assertIn("https://www.googleapis.com/auth/calendar.events", scopes)
+        self.assertIn("https://www.googleapis.com/auth/calendar.readonly", scopes)
+        self.assertTrue(params["state"][0])
+
+    def test_find_first_free_slot_respects_busy_meetings_and_buffer(self):
+        tz = ZoneInfo("Europe/Moscow")
+        window_start = datetime(2026, 4, 25, 16, 0, tzinfo=tz)
+        window_end = datetime(2026, 4, 25, 22, 0, tzinfo=tz)
+        busy = [
+            {"start": "2026-04-25T16:00:00+03:00", "end": "2026-04-25T16:30:00+03:00"},
+            {"start": "2026-04-25T17:15:00+03:00", "end": "2026-04-25T17:45:00+03:00"},
+        ]
+
+        slot = find_first_free_slot(busy, window_start, window_end, duration_min=30, buffer_min=15)
+
+        self.assertIsNotNone(slot)
+        self.assertEqual(slot[0], datetime(2026, 4, 25, 16, 45, tzinfo=tz))
+        self.assertEqual(slot[1], datetime(2026, 4, 25, 17, 15, tzinfo=tz))
+
+    def test_zoom_meeting_payload_uses_safe_scheduled_defaults(self):
+        tz = ZoneInfo("Europe/Moscow")
+        start = datetime(2026, 4, 25, 21, 15, tzinfo=tz)
+
+        payload = build_zoom_meeting_payload(
+            start=start,
+            duration_min=30,
+            topic="TG Outreach test meeting",
+            agenda="Тестовая встреча",
+        )
+
+        self.assertEqual(payload["topic"], "TG Outreach test meeting")
+        self.assertEqual(payload["type"], 2)
+        self.assertEqual(payload["start_time"], "2026-04-25T21:15:00+03:00")
+        self.assertEqual(payload["duration"], 30)
+        self.assertEqual(payload["timezone"], "Europe/Moscow")
+        self.assertFalse(payload["settings"]["join_before_host"])
+        self.assertTrue(payload["settings"]["waiting_room"])
+
+    def test_zoom_host_user_prefers_configured_email(self):
+        with patch.dict(os.environ, {"ZOOM_HOST_EMAIL": "host@example.com"}, clear=False):
+            self.assertEqual(zoom_host_user(), "host@example.com")
+
+    def test_calendar_description_includes_zoom_join_link(self):
+        description = build_calendar_event_description(
+            "Тестовая встреча.",
+            {"id": 123456789, "join_url": "https://zoom.us/j/123456789"},
+        )
+
+        self.assertIn("Тестовая встреча.", description)
+        self.assertIn("Zoom: https://zoom.us/j/123456789", description)
+        self.assertIn("Zoom meeting ID: 123456789", description)
+
+    def test_meeting_booking_prompt_adds_hidden_marker_instruction(self):
+        prompt = append_meeting_booking_instructions("base prompt")
+
+        self.assertIn("base prompt", prompt)
+        self.assertIn(BOOK_MEETING_MARKER, prompt)
+        self.assertIn("Do not show", prompt)
+
+    def test_meeting_booking_marker_is_removed_from_user_reply(self):
+        clean, wants_booking = extract_meeting_booking_intent(
+            f"Да, давайте созвонимся.\\n{BOOK_MEETING_MARKER}"
+        )
+
+        self.assertTrue(wants_booking)
+        self.assertEqual(clean, "Да, давайте созвонимся.")
+
+    def test_existing_scheduled_meeting_prevents_duplicate_booking(self):
+        start = datetime(2026, 4, 25, 21, 15, tzinfo=ZoneInfo("Europe/Moscow"))
+        end = datetime(2026, 4, 25, 21, 45, tzinfo=ZoneInfo("Europe/Moscow"))
+        with self._db() as db:
+            db.add(Account(id=25, name="Ana", phone="+573122997125", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=125, account_id=25, tg_user_id="425", tg_username="lead_user_25"))
+            db.add(
+                ScheduledMeeting(
+                    conversation_id=125,
+                    status="scheduled",
+                    scheduled_start=start,
+                    scheduled_end=end,
+                    timezone="Europe/Moscow",
+                    calendar_event_id="google-event-1",
+                    calendar_html_link="https://calendar.google.com/event",
+                    zoom_meeting_id="123456789",
+                    zoom_join_url="https://zoom.us/j/123456789",
+                )
+            )
+            db.commit()
+
+            meeting = get_existing_scheduled_meeting(db, 125)
+
+        self.assertIsNotNone(meeting)
+        self.assertEqual(meeting.zoom_join_url, "https://zoom.us/j/123456789")
+
+    def test_meeting_reply_text_contains_exact_slot_and_zoom_link(self):
+        start = datetime(2026, 4, 25, 21, 15, tzinfo=ZoneInfo("Europe/Moscow"))
+        end = datetime(2026, 4, 25, 21, 45, tzinfo=ZoneInfo("Europe/Moscow"))
+
+        text = build_meeting_reply_text(start, end, "https://zoom.us/j/123456789")
+
+        self.assertIn("25.04.2026", text)
+        self.assertIn("21:15-21:45 МСК", text)
+        self.assertIn("https://zoom.us/j/123456789", text)
+
+    def test_book_meeting_for_conversation_creates_zoom_calendar_and_db_record(self):
+        with self._db() as db:
+            db.add(Account(id=26, name="Ana", phone="+573122997126", app_id="2040", app_hash="hash"))
+            db.add(
+                Conversation(
+                    id=126,
+                    account_id=26,
+                    tg_user_id="426",
+                    tg_username="lead_user_26",
+                    tg_first_name="Lead",
+                )
+            )
+            db.commit()
+
+            with patch("backend.meeting_scheduler.find_next_available_slot", AsyncMock(return_value=(
+                datetime(2026, 4, 25, 21, 15, tzinfo=ZoneInfo("Europe/Moscow")),
+                datetime(2026, 4, 25, 21, 45, tzinfo=ZoneInfo("Europe/Moscow")),
+            ))):
+                with patch("backend.meeting_scheduler.create_zoom_meeting", AsyncMock(return_value={
+                    "id": 123456789,
+                    "join_url": "https://zoom.us/j/123456789",
+                })) as zoom:
+                    with patch("backend.meeting_scheduler.create_calendar_event", AsyncMock(return_value={
+                        "id": "google-event-1",
+                        "htmlLink": "https://calendar.google.com/event",
+                    })) as calendar:
+                        result = asyncio.run(book_meeting_for_conversation(db, 126))
+                        second = asyncio.run(book_meeting_for_conversation(db, 126))
+
+            stored = db.query(ScheduledMeeting).filter(ScheduledMeeting.conversation_id == 126).all()
+
+        self.assertTrue(result["created"])
+        self.assertFalse(second["created"])
+        self.assertEqual(result["zoom_join_url"], "https://zoom.us/j/123456789")
+        self.assertEqual(result["calendar_html_link"], "https://calendar.google.com/event")
+        self.assertEqual(len(stored), 1)
+        zoom.assert_awaited_once()
+        calendar.assert_awaited_once()
+
+    def test_schedule_conversation_meeting_endpoint_returns_reply_text(self):
+        with self._db() as db:
+            db.add(Account(id=27, name="Ana", phone="+573122997127", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=127, account_id=27, tg_user_id="427", tg_username="lead_user_27"))
+            db.commit()
+
+        app = FastAPI()
+        app.include_router(conversations_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            with patch("backend.routers.conversations.book_meeting_for_conversation", AsyncMock(return_value={
+                "ok": True,
+                "created": True,
+                "reply_text": "Забронировал встречу на 25.04.2026, 21:15-21:45 МСК. Ссылка Zoom: https://zoom.us/j/123456789",
+                "zoom_join_url": "https://zoom.us/j/123456789",
+            })):
+                response = client.post("/api/conversations/127/schedule-meeting")
+        finally:
+            client.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["created"])
+        self.assertIn("https://zoom.us/j/123456789", payload["reply_text"])
+
+    def test_run_scheduled_auto_reply_books_meeting_when_ai_returns_marker(self):
+        with self._db() as db:
+            db.add(
+                Account(
+                    id=28,
+                    name="Ana",
+                    phone="+573122997128",
+                    app_id="2040",
+                    app_hash="hash",
+                    auto_reply=True,
+                )
+            )
+            db.add(Settings(id=1, provider="openai", auto_reply_enabled=True, openai_key="sk-test", model="gpt-4o-mini"))
+            db.add(
+                Conversation(
+                    id=128,
+                    account_id=28,
+                    tg_user_id="428",
+                    tg_username="lead_user_28",
+                    tg_first_name="Lead",
+                    status="active",
+                )
+            )
+            db.add(Message(conversation_id=128, role="user", text="Да, давайте созвонимся"))
+            db.commit()
+            trigger_id = db.query(Message).filter(Message.conversation_id == 128).first().id
+
+        booked_reply = "Забронировал встречу на 25.04.2026, 21:15-21:45 МСК. Ссылка Zoom: https://zoom.us/j/123456789"
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch("backend.telegram_client.asyncio.sleep", AsyncMock()):
+                with patch("backend.gpt_handler.generate_reply", AsyncMock(return_value=f"Отлично, договорились.\\n{BOOK_MEETING_MARKER}")):
+                    with patch("backend.telegram_client.maybe_book_meeting_from_reply", AsyncMock(return_value=(
+                        f"Отлично, договорились.\n\n{booked_reply}",
+                        {"ok": True, "created": True, "reply_text": booked_reply},
+                    ))) as book:
+                        with patch("backend.telegram_client.send_manual_message", AsyncMock(return_value={"ok": True})) as send:
+                            asyncio.run(
+                                tg._run_scheduled_auto_reply(
+                                    account_id=28,
+                                    conversation_id=128,
+                                    tg_user_id="428",
+                                    trigger_message_id=trigger_id,
+                                    delay_s=7.0,
+                                    scheduled_at=tg._utcnow(),
+                                )
+                            )
+
+        book.assert_awaited_once()
+        sent_text = send.await_args.args[3]
+        self.assertIn("Отлично, договорились.", sent_text)
+        self.assertIn(booked_reply, sent_text)
+        self.assertNotIn(BOOK_MEETING_MARKER, sent_text)
+
+    def test_run_scheduled_auto_reply_sends_clean_fallback_when_booking_fails(self):
+        with self._db() as db:
+            db.add(
+                Account(
+                    id=29,
+                    name="Ana",
+                    phone="+573122997129",
+                    app_id="2040",
+                    app_hash="hash",
+                    auto_reply=True,
+                )
+            )
+            db.add(Settings(id=1, provider="openai", auto_reply_enabled=True, openai_key="sk-test", model="gpt-4o-mini"))
+            db.add(Conversation(id=129, account_id=29, tg_user_id="429", tg_username="lead_user_29", status="active"))
+            db.add(Message(conversation_id=129, role="user", text="Да, хочу созвон"))
+            db.commit()
+            trigger_id = db.query(Message).filter(Message.conversation_id == 129).first().id
+
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch("backend.telegram_client.asyncio.sleep", AsyncMock()):
+                with patch("backend.gpt_handler.generate_reply", AsyncMock(return_value=f"Отлично, договорились.\\n{BOOK_MEETING_MARKER}")):
+                    with patch("backend.telegram_client.maybe_book_meeting_from_reply", AsyncMock(side_effect=HTTPException(409, "No free slot"))):
+                        with patch("backend.telegram_client.send_manual_message", AsyncMock(return_value={"ok": True})) as send:
+                            asyncio.run(
+                                tg._run_scheduled_auto_reply(
+                                    account_id=29,
+                                    conversation_id=129,
+                                    tg_user_id="429",
+                                    trigger_message_id=trigger_id,
+                                    delay_s=7.0,
+                                    scheduled_at=tg._utcnow(),
+                                )
+                            )
+
+        sent_text = send.await_args.args[3]
+        self.assertIn("Отлично, договорились.", sent_text)
+        self.assertIn("вернусь со ссылкой", sent_text)
+        self.assertNotIn(BOOK_MEETING_MARKER, sent_text)
 
     def test_list_campaigns_reports_runtime_task_state(self):
         with self._db() as db:
