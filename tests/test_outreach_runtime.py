@@ -11,7 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.database import get_db, Base
-from backend.models import Account, Campaign, CampaignTarget, Conversation, Message, ProxyPool, Settings
+from backend.models import Account, Campaign, CampaignTarget, Conversation, Message, PromptTemplate, ProxyPool, Settings
 from backend.routers import accounts as accounts_router
 from backend.routers import campaigns as campaigns_router
 from backend.routers import proxy_pool as proxy_pool_router
@@ -115,6 +115,28 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(kwargs["system_version"], "888")
         self.assertEqual(kwargs["app_version"], "999")
         self.assertEqual(kwargs["lang_code"], "111")
+
+    def test_resolve_prompt_prefers_account_prompt_over_campaign_prompt(self):
+        settings = Settings(system_prompt="global prompt")
+        account_prompt = PromptTemplate(id=1, name="Account prompt", system_prompt="account prompt")
+        campaign_prompt = PromptTemplate(id=2, name="Campaign prompt", system_prompt="campaign prompt")
+        account = Account(
+            name="Ana",
+            phone="+573122997010",
+            app_id="2040",
+            app_hash="hash",
+            prompt_template_id=account_prompt.id,
+            prompt_template=account_prompt,
+        )
+        campaign = Campaign(
+            name="Campaign",
+            account_id=1,
+            messages="[]",
+            prompt_template_id=campaign_prompt.id,
+            prompt_template=campaign_prompt,
+        )
+
+        self.assertEqual(tg._resolve_prompt(settings, account, campaign), "account prompt")
 
     def test_personalization_keeps_first_name_when_present(self):
         target = CampaignTarget(

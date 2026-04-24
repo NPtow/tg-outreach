@@ -76,7 +76,7 @@ class Account(Base):
     last_seen_online_at = Column(DateTime, nullable=True)
     session_source = Column(String(30), nullable=True)
     proxy_last_rtt_ms = Column(Integer, nullable=True)
-    # Custom prompt for this account (overrides global Settings.system_prompt)
+    # Custom prompt for this account (overrides campaign and global prompts)
     prompt_template_id = Column(Integer, ForeignKey("prompt_templates.id"), nullable=True)
     # Device fingerprint — generated once, immutable. Makes client look like real Telegram Desktop.
     device_model = Column(String(100), nullable=True)
@@ -167,7 +167,7 @@ class Campaign(Base):
     send_window_enabled = Column(Boolean, default=False)
     status = Column(String(20), default="draft")  # draft|running|paused|done
     created_at = Column(DateTime, default=datetime.utcnow)
-    # Prompt override for auto-replies on this campaign's conversations
+    # Campaign prompt for auto-replies when the account has no prompt
     prompt_template_id = Column(Integer, ForeignKey("prompt_templates.id"), nullable=True)
     # Stop conditions
     stop_on_reply = Column(Boolean, default=False)   # pause auto-reply when person responds

@@ -592,12 +592,12 @@ async def proxy_test_account(account_id: int) -> dict:
 def _resolve_prompt(settings: Settings, account: Account, campaign: Optional[Campaign]) -> str:
     """
     Resolve the active system prompt with priority:
-    campaign.prompt_template > account.prompt_template > settings.system_prompt
+    account.prompt_template > campaign.prompt_template > settings.system_prompt
     """
-    if campaign and campaign.prompt_template_id and campaign.prompt_template:
-        return campaign.prompt_template.system_prompt
     if account and account.prompt_template_id and account.prompt_template:
         return account.prompt_template.system_prompt
+    if campaign and campaign.prompt_template_id and campaign.prompt_template:
+        return campaign.prompt_template.system_prompt
     return settings.system_prompt if settings else ""
 
 
