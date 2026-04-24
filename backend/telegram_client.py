@@ -1823,7 +1823,10 @@ def _seconds_until_window_open(hour_from: int, hour_to: int) -> int:
 def _apply_personalization(text: str, target: CampaignTarget) -> str:
     """Substitute all {variable} placeholders from target fields."""
     first_name = (target.display_name or "").strip()
+    removed_leading_first_name = False
     if not first_name:
+        text, leading_count = re.subn(r"^\s*\{first_name\}\s*,?\s*", "", text)
+        removed_leading_first_name = leading_count > 0
         text = re.sub(r"\s*,\s*\{first_name\}", "", text)
         text = re.sub(r"\s+\{first_name\}\s*,?", " ", text)
     replacements = {
@@ -1836,7 +1839,10 @@ def _apply_personalization(text: str, target: CampaignTarget) -> str:
         text = text.replace(placeholder, value)
     text = re.sub(r"\s+([!?,.;:])", r"\1", text)
     text = re.sub(r"\s{2,}", " ", text)
-    return text.strip()
+    text = text.strip()
+    if removed_leading_first_name and text:
+        text = text[0].upper() + text[1:]
+    return text
 
 
 async def _campaign_worker(campaign_id: int):

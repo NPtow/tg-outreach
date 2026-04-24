@@ -152,6 +152,13 @@ class OutreachRuntimeTests(unittest.TestCase):
 
         self.assertEqual(text, "Hi wanted to ask you something.")
 
+    def test_personalization_removes_leading_first_name_when_missing(self):
+        target = CampaignTarget(username="lead_user", display_name=None)
+
+        text = tg._apply_personalization("{first_name}, привет!", target)
+
+        self.assertEqual(text, "Привет!")
+
     def test_campaign_is_running_requires_live_task(self):
         tg._campaign_tasks[7] = FakeTaskState(False)
         tg._campaign_tasks[8] = FakeTaskState(True)
