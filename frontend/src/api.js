@@ -113,5 +113,6 @@ export const api = {
   // Proxy Pool
   getProxies: () => req("GET", "/api/proxy-pool/"),
   addProxy: (line) => req("POST", "/api/proxy-pool/", { line }),
+  testProxy: (id) => req("POST", `/api/proxy-pool/${id}/test`),
   deleteProxy: (id) => req("DELETE", `/api/proxy-pool/${id}`),
 };

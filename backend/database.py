@@ -85,6 +85,11 @@ def init_db():
         ("accounts", "system_version TEXT"),
         ("accounts", "app_version TEXT"),
         ("accounts", "lang_code TEXT"),
+        # proxy pool health
+        ("proxy_pool", "proxy_state TEXT DEFAULT 'unknown'"),
+        ("proxy_pool", "last_error_message TEXT"),
+        ("proxy_pool", "last_proxy_check_at TIMESTAMP"),
+        ("proxy_pool", "proxy_last_rtt_ms INTEGER"),
     ]
     with engine.connect() as conn:
         for table, col_def in new_cols:

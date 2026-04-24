@@ -511,6 +511,57 @@ class OutreachRuntimeTests(unittest.TestCase):
             account = db.query(Account).filter(Account.phone == "+573122997093").first()
             self.assertEqual(account.proxy_pass, "z4a6tw")
 
+    def test_update_account_can_select_proxy_by_proxy_id(self):
+        with self._db() as db:
+            db.add(
+                Account(
+                    id=81,
+                    name="Needs Proxy",
+                    phone="+573122997181",
+                    app_id="2040",
+                    app_hash="hash",
+                )
+            )
+            db.add(
+                ProxyPool(
+                    id=91,
+                    host="104.164.5.115",
+                    port=8184,
+                    proxy_type="HTTP",
+                    username="user397647",
+                    password="z4a6tw",
+                    proxy_state="ok",
+                )
+            )
+            db.commit()
+
+        app = FastAPI()
+        app.include_router(accounts_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            response = client.patch("/api/accounts/81", json={"proxy_id": 91})
+            self.assertEqual(response.status_code, 200)
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        with self._db() as db:
+            account = db.query(Account).filter(Account.id == 81).first()
+            self.assertEqual(account.proxy_host, "104.164.5.115")
+            self.assertEqual(account.proxy_port, 8184)
+            self.assertEqual(account.proxy_type, "HTTP")
+            self.assertEqual(account.proxy_user, "user397647")
+            self.assertEqual(account.proxy_pass, "z4a6tw")
+
     def test_proxy_pool_autodetects_type_when_line_omits_type(self):
         app = FastAPI()
         app.include_router(proxy_pool_router.router)
@@ -544,6 +595,8 @@ class OutreachRuntimeTests(unittest.TestCase):
         with self._db() as db:
             proxy = db.query(ProxyPool).filter(ProxyPool.host == "82.39.223.11").first()
             self.assertEqual(proxy.proxy_type, "HTTP")
+            self.assertEqual(proxy.proxy_state, "ok")
+            self.assertEqual(proxy.proxy_last_rtt_ms, 42)
 
     def test_proxy_pool_type_prefix_is_used_as_detection_preference(self):
         app = FastAPI()
@@ -573,6 +626,60 @@ class OutreachRuntimeTests(unittest.TestCase):
         finally:
             client.close()
             app.dependency_overrides.clear()
+
+    def test_proxy_pool_test_persists_timeout_state(self):
+        with self._db() as db:
+            db.add(
+                ProxyPool(
+                    id=92,
+                    host="82.39.223.11",
+                    port=8184,
+                    proxy_type="HTTP",
+                    username="user397647",
+                    password="z4a6tw",
+                )
+            )
+            db.commit()
+
+        app = FastAPI()
+        app.include_router(proxy_pool_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            with patch(
+                "backend.routers.proxy_pool.detect_proxy_type",
+                AsyncMock(
+                    return_value={
+                        "ok": False,
+                        "attempts": [
+                            {"proxy_type": "HTTP", "error_type": "ProxyError"},
+                            {"proxy_type": "SOCKS5", "error_type": "TimeoutError"},
+                        ],
+                    }
+                ),
+            ):
+                response = client.post("/api/proxy-pool/92/test")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["proxy_state"], "timeout")
+            self.assertIn("HTTP=ProxyError", payload["last_error_message"])
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        with self._db() as db:
+            proxy = db.query(ProxyPool).filter(ProxyPool.id == 92).first()
+            self.assertEqual(proxy.proxy_state, "timeout")
+            self.assertIn("SOCKS5=TimeoutError", proxy.last_error_message)
 
     def test_proxy_connectivity_check_persists_detected_type_for_account_and_pool(self):
         with self._db() as db:

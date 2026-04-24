@@ -15,6 +15,10 @@ class ProxyPool(Base):
     proxy_type = Column(String(10), default="SOCKS5")
     username = Column(String(100), nullable=True)
     password = Column(Text, nullable=True)
+    proxy_state = Column(String(30), default="unknown")
+    last_error_message = Column(Text, nullable=True)
+    last_proxy_check_at = Column(DateTime, nullable=True)
+    proxy_last_rtt_ms = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

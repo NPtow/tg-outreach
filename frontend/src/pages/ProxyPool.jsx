@@ -2,10 +2,28 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { EmptyState, PageHeader, Surface } from "../components/workspace";
 
+const PROXY_STATE_META = {
+  ok: { label: "Работает", cls: "bg-emerald-500/15 text-emerald-400" },
+  timeout: { label: "Timeout", cls: "bg-orange-500/15 text-orange-400" },
+  failed: { label: "Ошибка", cls: "bg-red-500/15 text-red-400" },
+  auth_failed: { label: "Auth", cls: "bg-red-500/15 text-red-400" },
+  unknown: { label: "Не проверен", cls: "bg-zinc-800 text-zinc-400" },
+};
+
+function fmtTs(value) {
+  if (!value) return "—";
+  return new Date(value).toLocaleString("ru", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function proxyStateMeta(value) {
+  return PROXY_STATE_META[value || "unknown"] || PROXY_STATE_META.unknown;
+}
+
 export default function ProxyPool() {
   const [proxies, setProxies] = useState([]);
   const [line, setLine] = useState("");
   const [adding, setAdding] = useState(false);
+  const [testing, setTesting] = useState({});
   const [error, setError] = useState("");
 
   const load = () => api.getProxies().then(setProxies);
@@ -28,6 +46,24 @@ export default function ProxyPool() {
     load();
   };
 
+  const handleTest = async (id) => {
+    setTesting((s) => ({ ...s, [id]: true }));
+    setError("");
+    try {
+      const tested = await api.testProxy(id);
+      setProxies((items) => items.map((p) => p.id === id ? { ...p, ...tested } : p));
+    } catch (e) {
+      setError(e.message);
+      load();
+    } finally {
+      setTesting((s) => ({ ...s, [id]: false }));
+    }
+  };
+
+  const workingCount = proxies.filter((p) => p.proxy_state === "ok").length;
+  const badCount = proxies.filter((p) => ["timeout", "failed", "auth_failed"].includes(p.proxy_state)).length;
+  const unknownCount = proxies.filter((p) => !p.proxy_state || p.proxy_state === "unknown").length;
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -36,8 +72,9 @@ export default function ProxyPool() {
         description="Один прокси на один аккаунт. Тип определяется автоматически; можно явно указать HTTP:host:port:user:pass"
         stats={[
           { label: "Proxies", value: proxies.length, tone: proxies.length ? "blue" : "neutral", caption: "In pool" },
-          { label: "In use", value: proxies.filter(p => p.used_by).length, tone: "neutral", caption: "Assigned to accounts" },
-          { label: "Free", value: proxies.filter(p => !p.used_by).length, tone: proxies.filter(p => !p.used_by).length ? "emerald" : "neutral", caption: "Available" },
+          { label: "Working", value: workingCount, tone: workingCount ? "emerald" : "neutral", caption: "Tested ok" },
+          { label: "Broken", value: badCount, tone: badCount ? "amber" : "neutral", caption: "Timeout or failed" },
+          { label: "Untested", value: unknownCount, tone: "neutral", caption: "Needs check" },
         ]}
       />
 
@@ -72,10 +109,18 @@ export default function ProxyPool() {
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-sm text-zinc-100">{p.host}:{p.port}</span>
                   <span className="text-xs bg-zinc-800 text-zinc-400 px-1.5 py-0.5 rounded font-mono">{p.proxy_type || "AUTO"}</span>
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${proxyStateMeta(p.proxy_state).cls}`}>
+                    {proxyStateMeta(p.proxy_state).label}
+                  </span>
                   {p.username && <span className="text-xs text-zinc-500 font-mono">{p.username}</span>}
                   {p.has_password && <span className="text-xs text-zinc-600">🔐</span>}
                 </div>
                 {p.label && <p className="text-xs text-zinc-500 mt-0.5">{p.label}</p>}
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-zinc-600 mt-1">
+                  <span>Last check: <span className="text-zinc-400">{fmtTs(p.last_proxy_check_at)}</span></span>
+                  <span>RTT: <span className="text-zinc-400">{p.proxy_last_rtt_ms ? `${p.proxy_last_rtt_ms} ms` : "—"}</span></span>
+                  {p.last_error_message && <span className="text-orange-300 truncate max-w-[520px]" title={p.last_error_message}>{p.last_error_message}</span>}
+                </div>
               </div>
               <div className="shrink-0">
                 {p.used_by ? (
@@ -88,6 +133,10 @@ export default function ProxyPool() {
                   </span>
                 )}
               </div>
+              <button onClick={() => handleTest(p.id)} disabled={testing[p.id]}
+                className="text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 shrink-0">
+                {testing[p.id] ? "Тест..." : "Test"}
+              </button>
               <button onClick={() => handleDelete(p.id)}
                 className="text-xs text-zinc-600 hover:text-red-400 transition-colors shrink-0 px-2 py-1">
                 Удалить

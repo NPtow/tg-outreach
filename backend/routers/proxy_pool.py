@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from datetime import datetime
 from typing import Optional
 
 from backend.database import get_db
@@ -22,7 +23,23 @@ class ProxyCreate(BaseModel):
     password: Optional[str] = None
 
 
-def _serialize(p: ProxyPool, used_by: Optional[str] = None) -> dict:
+def _attempt_summary(attempts: list[dict]) -> str:
+    return ", ".join(
+        f"{attempt.get('proxy_type')}={attempt.get('error_type') or 'failed'}"
+        for attempt in attempts
+    )
+
+
+def _serialize(p: ProxyPool, used_by: Optional[Account] = None) -> dict:
+    proxy_state = p.proxy_state or "unknown"
+    last_error_message = p.last_error_message
+    last_proxy_check_at = p.last_proxy_check_at
+    proxy_last_rtt_ms = p.proxy_last_rtt_ms
+    if used_by and proxy_state == "unknown":
+        proxy_state = used_by.proxy_state or "unknown"
+        last_error_message = used_by.last_error_message
+        last_proxy_check_at = used_by.last_proxy_check_at
+        proxy_last_rtt_ms = used_by.proxy_last_rtt_ms
     return {
         "id": p.id,
         "label": p.label or "",
@@ -31,8 +48,13 @@ def _serialize(p: ProxyPool, used_by: Optional[str] = None) -> dict:
         "proxy_type": p.proxy_type,
         "username": p.username or "",
         "has_password": bool(p.password),
+        "proxy_state": proxy_state,
+        "last_error_message": last_error_message,
+        "last_proxy_check_at": last_proxy_check_at,
+        "proxy_last_rtt_ms": proxy_last_rtt_ms,
         "created_at": p.created_at,
-        "used_by": used_by,
+        "used_by": used_by.name if used_by else None,
+        "used_by_account_id": used_by.id if used_by else None,
     }
 
 
@@ -58,13 +80,6 @@ def _parse_proxy_line(line: str) -> tuple[Optional[str], str, int, Optional[str]
     return proxy_type, host, port, username, password
 
 
-def _attempt_summary(attempts: list[dict]) -> str:
-    return ", ".join(
-        f"{attempt.get('proxy_type')}={attempt.get('error_type') or 'failed'}"
-        for attempt in attempts
-    )
-
-
 @router.get("/")
 def list_proxies(db: Session = Depends(get_db)):
     proxies = db.query(ProxyPool).order_by(ProxyPool.id).all()
@@ -73,11 +88,11 @@ def list_proxies(db: Session = Depends(get_db)):
     used = {}
     for acc in accounts:
         if acc.proxy_host and acc.proxy_port:
-            key = f"{acc.proxy_host}:{acc.proxy_port}"
-            used[key] = acc.name
+            key = f"{acc.proxy_host}:{acc.proxy_port}:{acc.proxy_user or ''}"
+            used[key] = acc
     result = []
     for p in proxies:
-        key = f"{p.host}:{p.port}"
+        key = f"{p.host}:{p.port}:{p.username or ''}"
         result.append(_serialize(p, used.get(key)))
     return result
 
@@ -110,12 +125,61 @@ async def add_proxy(data: ProxyCreate, db: Session = Depends(get_db)):
             f"Proxy does not connect to Telegram as HTTP/SOCKS5/SOCKS4: {_attempt_summary(detected.get('attempts', []))}",
         )
 
-    p = ProxyPool(host=host, port=port, proxy_type=detected["proxy_type"],
-                  username=username, password=password, label=label)
+    p = ProxyPool(
+        host=host,
+        port=port,
+        proxy_type=detected["proxy_type"],
+        username=username,
+        password=password,
+        label=label,
+        proxy_state="ok",
+        last_error_message=None,
+        last_proxy_check_at=datetime.utcnow(),
+        proxy_last_rtt_ms=detected.get("rtt_ms"),
+    )
     db.add(p)
     db.commit()
     db.refresh(p)
     return _serialize(p)
+
+
+@router.post("/{proxy_id}/test")
+async def test_proxy(proxy_id: int, db: Session = Depends(get_db)):
+    p = db.query(ProxyPool).filter(ProxyPool.id == proxy_id).first()
+    if not p:
+        raise HTTPException(404, "Proxy not found")
+    detected = await detect_proxy_type(
+        host=p.host,
+        port=int(p.port),
+        username=p.username or None,
+        password=p.password or None,
+        preferred_type=p.proxy_type,
+    )
+    p.last_proxy_check_at = datetime.utcnow()
+    if detected.get("ok"):
+        p.proxy_type = detected["proxy_type"]
+        p.proxy_state = "ok"
+        p.proxy_last_rtt_ms = detected.get("rtt_ms")
+        p.last_error_message = None
+        db.commit()
+        db.refresh(p)
+        payload = _serialize(p)
+        payload["ok"] = True
+        payload["detected_proxy_type"] = detected.get("proxy_type")
+        return payload
+
+    attempts = detected.get("attempts", [])
+    timed_out = any(attempt.get("error_type") == "TimeoutError" for attempt in attempts)
+    p.proxy_state = "timeout" if timed_out else "failed"
+    p.proxy_last_rtt_ms = None
+    p.last_error_message = _attempt_summary(attempts) or "Proxy connection failed"
+    db.commit()
+    db.refresh(p)
+    payload = _serialize(p)
+    payload["ok"] = False
+    payload["error"] = p.last_error_message
+    payload["attempts"] = attempts
+    return payload
 
 
 @router.delete("/{proxy_id}")

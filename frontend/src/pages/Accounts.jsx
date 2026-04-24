@@ -96,6 +96,20 @@ function ProxyFields({ form, setForm }) {
   );
 }
 
+function proxyMatchesAccount(proxy, account) {
+  return (
+    proxy.host === account.proxy_host &&
+    Number(proxy.port) === Number(account.proxy_port) &&
+    (proxy.username || "") === (account.proxy_user || "")
+  );
+}
+
+function proxyLabel(proxy) {
+  const used = proxy.used_by ? ` — занят: ${proxy.used_by}` : "";
+  const health = proxy.proxy_state === "ok" ? "работает" : proxy.proxy_state || "не проверен";
+  return `${proxy.proxy_type || "AUTO"} ${proxy.host}:${proxy.port}${proxy.username ? ` (${proxy.username})` : ""} · ${health}${used}`;
+}
+
 function AddAccountModal({ onClose, onAdded }) {
   const [step, setStep] = useState(STEPS.FORM);
   const [name, setName] = useState("");
@@ -199,28 +213,35 @@ function AddAccountModal({ onClose, onAdded }) {
   );
 }
 
-function EditAccountModal({ account, onClose, onSaved }) {
+function EditAccountModal({ account, proxies, onClose, onSaved }) {
+  const currentProxy = proxies.find((p) => proxyMatchesAccount(p, account));
+  const currentProxyIsSelectable = Boolean(currentProxy?.proxy_state === "ok" && (!currentProxy.used_by_account_id || currentProxy.used_by_account_id === account.id));
+  const [proxyChoice, setProxyChoice] = useState(currentProxyIsSelectable ? String(currentProxy.id) : (account.proxy_host ? "__current__" : "__none__"));
   const [form, setForm] = useState({
     name: account.name || "",
     phone: account.phone || "",
     app_id: account.app_id || "",
     app_hash: "",
-    proxy_host: account.proxy_host || "",
-    proxy_port: account.proxy_port || "",
-    proxy_type: account.proxy_type || "SOCKS5",
-    proxy_user: account.proxy_user || "",
-    proxy_pass: "",
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const selectableProxies = proxies.filter((p) => (
+    p.proxy_state === "ok" &&
+    (!p.used_by_account_id || p.used_by_account_id === account.id)
+  ));
 
   const handleSave = async () => {
     setLoading(true); setError("");
     try {
-      await api.updateAccount(account.id, {
-        ...form,
-        proxy_port: form.proxy_port ? Number(form.proxy_port) : null,
-      });
+      const payload = { ...form };
+      if (proxyChoice === "__none__") {
+        payload.clear_proxy = true;
+      } else if (proxyChoice === "__current__") {
+        // Keep legacy/manual proxy unchanged.
+      } else {
+        payload.proxy_id = Number(proxyChoice);
+      }
+      await api.updateAccount(account.id, payload);
       onSaved();
     } catch (e) {
       setError(e.message);
@@ -238,7 +259,35 @@ function EditAccountModal({ account, onClose, onSaved }) {
           <Field label="App ID"><Input value={form.app_id} onChange={(e) => setForm({ ...form, app_id: e.target.value })} /></Field>
           <Field label="Новый App Hash"><Input placeholder="Оставь пустым чтобы не менять" value={form.app_hash} onChange={(e) => setForm({ ...form, app_hash: e.target.value })} /></Field>
         </div>
-        <ProxyFields form={form} setForm={setForm} />
+        <div className="border-t border-zinc-800 pt-3 space-y-3">
+          <p className="text-xs font-medium text-zinc-500">Proxy</p>
+          <Field label="Выбрать рабочий прокси из пула">
+            <select
+              className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-blue-500"
+              value={proxyChoice}
+              onChange={(e) => setProxyChoice(e.target.value)}
+            >
+              <option value="__none__">— без прокси —</option>
+              {account.proxy_host && !currentProxyIsSelectable && (
+                <option value="__current__">
+                  текущий: {account.proxy_type || "AUTO"} {account.proxy_host}:{account.proxy_port}{account.proxy_user ? ` (${account.proxy_user})` : ""} — оставить как есть
+                </option>
+              )}
+              {selectableProxies.map((p) => (
+                <option key={p.id} value={p.id}>{proxyLabel(p)}</option>
+              ))}
+            </select>
+            <p className="text-[11px] text-zinc-600 mt-1">
+              Показываются только прокси со статусом “работает” и без другого аккаунта. Проверь прокси на вкладке Proxies, если его нет в списке.
+            </p>
+          </Field>
+          {account.proxy_host && (
+            <p className="text-[11px] text-zinc-500 bg-zinc-950/60 border border-zinc-800 rounded-lg px-3 py-2">
+              Текущий прокси аккаунта: <span className="font-mono text-zinc-300">{account.proxy_type || "AUTO"} {account.proxy_host}:{account.proxy_port}</span>
+              {account.proxy_state && <span className="ml-2 text-zinc-400">status: {badgeFor(account.proxy_state).label}</span>}
+            </p>
+          )}
+        </div>
       </div>
       {error && <p className="text-red-400 text-xs mt-3 bg-red-500/10 px-3 py-2 rounded-lg">{error}</p>}
       <div className="flex gap-2 mt-5">
@@ -362,6 +411,7 @@ function HealthBadge({ value }) {
 export default function Accounts() {
   const [accounts, setAccounts] = useState([]);
   const [prompts, setPrompts] = useState([]);
+  const [proxies, setProxies] = useState([]);
   const [runtime, setRuntime] = useState(null);
   const [showModal, setShowModal] = useState(false);
   const [showTdata, setShowTdata] = useState(false);
@@ -374,6 +424,7 @@ export default function Accounts() {
   const load = () => Promise.all([
     api.getAccounts().then(setAccounts),
     api.getPrompts().then(setPrompts),
+    api.getProxies().then(setProxies),
     api.getRuntimeStatus().then(setRuntime).catch(() => setRuntime({ ok: false, owns_runtime: false })),
   ]);
 
@@ -543,7 +594,7 @@ export default function Accounts() {
 
       {showModal && <AddAccountModal onClose={() => setShowModal(false)} onAdded={() => { setShowModal(false); load(); }} />}
       {showTdata && <ImportTdataModal onClose={() => setShowTdata(false)} onAdded={() => { setShowTdata(false); load(); }} />}
-      {editAccount && <EditAccountModal account={editAccount} onClose={() => setEditAccount(null)} onSaved={() => { setEditAccount(null); load(); }} />}
+      {editAccount && <EditAccountModal account={editAccount} proxies={proxies} onClose={() => setEditAccount(null)} onSaved={() => { setEditAccount(null); load(); }} />}
       {reauthAccount && <ReauthModal account={reauthAccount} onClose={() => setReauthAccount(null)} onDone={() => { setReauthAccount(null); load(); }} />}
     </div>
   );

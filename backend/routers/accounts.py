@@ -42,6 +42,8 @@ class AccountUpdate(BaseModel):
     phone: Optional[str] = None
     app_id: Optional[str] = None
     app_hash: Optional[str] = None
+    proxy_id: Optional[int] = None
+    clear_proxy: bool = False
     proxy_host: Optional[str] = None
     proxy_port: Optional[int] = None
     proxy_type: Optional[str] = None
@@ -202,16 +204,40 @@ def update_account(account_id: int, data: AccountUpdate, db: Session = Depends(g
     if data.app_hash is not None:
         acc.app_hash = encrypt_value(data.app_hash) if data.app_hash else acc.app_hash
 
-    if data.proxy_host is not None:
+    if data.clear_proxy:
+        acc.proxy_host = None
+        acc.proxy_port = None
+        acc.proxy_type = None
+        acc.proxy_user = None
+        acc.proxy_pass = None
+    elif data.proxy_id is not None:
+        proxy = db.query(ProxyPool).filter(ProxyPool.id == data.proxy_id).first()
+        if not proxy:
+            raise HTTPException(400, "Proxy not found")
+        acc.proxy_host = proxy.host
+        acc.proxy_port = proxy.port
+        acc.proxy_type = (proxy.proxy_type or "SOCKS5").upper()
+        acc.proxy_user = proxy.username or None
+        acc.proxy_pass = encrypt_value(proxy.password) if proxy.password else None
+    elif data.proxy_host is not None:
         acc.proxy_host = data.proxy_host or None
-    if data.proxy_port is not None:
-        acc.proxy_port = data.proxy_port or None
-    if data.proxy_type is not None:
-        acc.proxy_type = (data.proxy_type or "SOCKS5").upper()
-    if data.proxy_user is not None:
-        acc.proxy_user = data.proxy_user or None
-    if data.proxy_pass is not None:
-        acc.proxy_pass = encrypt_value(data.proxy_pass) if data.proxy_pass else None
+        if data.proxy_port is not None:
+            acc.proxy_port = data.proxy_port or None
+        if data.proxy_type is not None:
+            acc.proxy_type = (data.proxy_type or "SOCKS5").upper()
+        if data.proxy_user is not None:
+            acc.proxy_user = data.proxy_user or None
+        if data.proxy_pass is not None:
+            acc.proxy_pass = encrypt_value(data.proxy_pass) if data.proxy_pass else None
+    else:
+        if data.proxy_port is not None:
+            acc.proxy_port = data.proxy_port or None
+        if data.proxy_type is not None:
+            acc.proxy_type = (data.proxy_type or "SOCKS5").upper()
+        if data.proxy_user is not None:
+            acc.proxy_user = data.proxy_user or None
+        if data.proxy_pass is not None:
+            acc.proxy_pass = encrypt_value(data.proxy_pass) if data.proxy_pass else None
 
     db.commit()
     db.refresh(acc)
