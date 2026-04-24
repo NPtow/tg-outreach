@@ -271,7 +271,7 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
 
   const targetCount = targetsText.split("\n").filter(t => t.trim()).length;
   const csvCount = targetsText.split("\n").filter(t => t.includes(",") && t.trim()).length;
-  const usedVars = ["first_name","company","role","note"].filter(v => messagesText.includes(`{${v}}`));
+  const usedVars = ["first_name","agent_name","company","role","note"].filter(v => messagesText.includes(`{${v}}`));
 
   return (
     <Modal title="Новая кампания" onClose={onClose}>
@@ -331,7 +331,7 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
             Варианты первого сообщения <span className="text-zinc-600 font-normal">— разделяй через ---</span>
           </label>
           <textarea rows={5} className={`${inputCls} resize-y`}
-            placeholder={"Привет, {first_name}! Ты из {company}? Хочу обсудить...\n---\nДобрый день! Вижу что ты {role}, интересно..."}
+            placeholder={"Здравствуйте, {first_name}! Меня зовут {agent_name}, хочу коротко обсудить...\n---\nДобрый день! Вижу что вы {role}, интересно..."}
             value={messagesText} onChange={e => setMessagesText(e.target.value)} />
           <div className="flex items-center gap-3 mt-1">
             <p className="text-[11px] text-zinc-600">{messagesText.split("---").filter(m => m.trim()).length} вариант(а)</p>

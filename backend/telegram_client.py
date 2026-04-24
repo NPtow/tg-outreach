@@ -1820,9 +1820,10 @@ def _seconds_until_window_open(hour_from: int, hour_to: int) -> int:
     return max(0, int((target - now_msk).total_seconds()))
 
 
-def _apply_personalization(text: str, target: CampaignTarget) -> str:
-    """Substitute all {variable} placeholders from target fields."""
+def _apply_personalization(text: str, target: CampaignTarget, account: Optional[Account] = None) -> str:
+    """Substitute placeholders from the target and the sending account."""
     first_name = (target.display_name or "").strip()
+    agent_name = (account.name if account else "") or ""
     removed_leading_first_name = False
     if not first_name:
         text, leading_count = re.subn(r"^\s*\{first_name\}\s*,?\s*", "", text)
@@ -1834,6 +1835,7 @@ def _apply_personalization(text: str, target: CampaignTarget) -> str:
         "{company}": target.company or "",
         "{role}": target.role or "",
         "{note}": target.custom_note or "",
+        "{agent_name}": agent_name.strip(),
     }
     for placeholder, value in replacements.items():
         text = text.replace(placeholder, value)
@@ -1950,7 +1952,7 @@ async def _campaign_worker(campaign_id: int):
 
                 messages = json.loads(campaign.messages)
                 text = random.choice(messages)
-                text = _apply_personalization(text, target)
+                text = _apply_personalization(text, target, _account)
 
                 try:
                     entity = await _await_campaign_call(
