@@ -173,6 +173,44 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertNotIn("max_tokens", calls[0])
         self.assertNotIn("temperature", calls[0])
 
+    def test_send_manual_message_resolves_recipient_by_conversation_username(self):
+        entity = SimpleNamespace(id=432, username="lead_user_32")
+
+        class FakeClient:
+            def __init__(self):
+                self.resolved = []
+                self.sent = []
+
+            async def get_entity(self, username):
+                self.resolved.append(username)
+                return entity
+
+            async def send_message(self, recipient, text):
+                self.sent.append((recipient, text))
+
+        with self._db() as db:
+            db.add(Account(id=32, name="Ana", phone="+573122997132", app_id="2040", app_hash="hash"))
+            db.add(
+                Conversation(
+                    id=132,
+                    account_id=32,
+                    tg_user_id="432",
+                    tg_username="lead_user_32",
+                    status="active",
+                )
+            )
+            db.commit()
+
+        client = FakeClient()
+        tg._clients[32] = client
+
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            result = asyncio.run(tg.send_manual_message(32, "432", 132, "hello"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.resolved, ["lead_user_32"])
+        self.assertEqual(client.sent, [(entity, "hello")])
+
     def test_personalization_keeps_first_name_when_present(self):
         target = CampaignTarget(
             username="lead_user",

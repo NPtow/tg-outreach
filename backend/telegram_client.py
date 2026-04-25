@@ -1671,7 +1671,44 @@ async def send_manual_message(account_id: int, tg_user_id: str, conversation_id:
         client = _clients.get(account_id)
     if not client:
         return {"ok": False, "error": "Account is not connected"}
-    await client.send_message(int(tg_user_id), text)
+
+    recipient = int(tg_user_id)
+    db = SessionLocal()
+    try:
+        conv = db.query(Conversation).filter(
+            Conversation.id == conversation_id,
+            Conversation.account_id == account_id,
+        ).first()
+        username = (conv.tg_username or "").strip().lstrip("@") if conv else ""
+    finally:
+        db.close()
+
+    if username:
+        try:
+            recipient = await client.get_entity(username)
+        except Exception as exc:
+            logger.warning(
+                "manual_send_username_resolve_failed account_id=%s conversation_id=%s username=%s error=%s",
+                account_id,
+                conversation_id,
+                username,
+                exc,
+            )
+
+    try:
+        await client.send_message(recipient, text)
+    except Exception as exc:
+        logger.error(
+            "manual_send_failed account_id=%s conversation_id=%s tg_user_id=%s username=%s error=%s",
+            account_id,
+            conversation_id,
+            tg_user_id,
+            username,
+            exc,
+            exc_info=True,
+        )
+        return {"ok": False, "error": _as_str(exc) or "Message send failed"}
+
     _clear_error(account_id, connection_state="online", last_seen_online_at=_utcnow())
     conv = _persist_outgoing_outreach_message(
         account_id=account_id,
