@@ -138,6 +138,41 @@ class OutreachRuntimeTests(unittest.TestCase):
 
         self.assertEqual(tg._resolve_prompt(settings, account, campaign), "account prompt")
 
+    def test_openai_new_generation_models_use_completion_token_limit(self):
+        import backend.gpt_handler as gpt_handler
+
+        calls = []
+
+        class FakeCompletions:
+            async def create(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+                )
+
+        class FakeAsyncOpenAI:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(
+                    completions=FakeCompletions()
+                )
+
+        history = [SimpleNamespace(role="user", text="hello")]
+
+        with patch.dict("sys.modules", {"openai": SimpleNamespace(AsyncOpenAI=FakeAsyncOpenAI)}):
+            reply = asyncio.run(gpt_handler._openai_compatible_reply(
+                "openai",
+                "test-key",
+                "",
+                "gpt-5.4-mini",
+                "system",
+                history,
+            ))
+
+        self.assertEqual(reply, "ok")
+        self.assertEqual(calls[0]["max_completion_tokens"], 500)
+        self.assertNotIn("max_tokens", calls[0])
+        self.assertNotIn("temperature", calls[0])
+
     def test_personalization_keeps_first_name_when_present(self):
         target = CampaignTarget(
             username="lead_user",

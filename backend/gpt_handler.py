@@ -4,6 +4,11 @@ from typing import List
 logger = logging.getLogger(__name__)
 
 
+def _uses_max_completion_tokens(model: str) -> bool:
+    normalized = (model or "").lower()
+    return normalized.startswith(("gpt-5", "o3", "o4"))
+
+
 async def generate_reply(
     provider: str,
     openai_key: str,
@@ -76,12 +81,17 @@ async def _openai_compatible_reply(
         for msg in history:
             messages.append({"role": msg.role, "content": msg.text})
 
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=500,
-            temperature=0.7,
-        )
+        request_kwargs = {
+            "model": model,
+            "messages": messages,
+        }
+        if _uses_max_completion_tokens(model):
+            request_kwargs["max_completion_tokens"] = 500
+        else:
+            request_kwargs["max_tokens"] = 500
+            request_kwargs["temperature"] = 0.7
+
+        response = await client.chat.completions.create(**request_kwargs)
         return response.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"OpenAI-compatible ({provider}) error: {e}")
