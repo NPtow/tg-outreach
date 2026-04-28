@@ -3,6 +3,7 @@ Telethon client manager + Campaign worker.
 """
 import asyncio
 import base64
+import html
 import json
 import logging
 import os
@@ -71,6 +72,8 @@ _USERNAME_PAGE_CACHE: Dict[str, tuple[float, bool]] = {}
 _SUPPORTED_CONNECTION_STATES = {"offline", "online", "connecting", "degraded", "reauth_required"}
 _SUPPORTED_ELIGIBILITY_STATES = {"eligible", "blocked_proxy", "blocked_auth", "blocked_runtime"}
 _TRANSIENT_LIMIT_ERROR_CODES = {"PEER_FLOOD", "FLOOD_WAIT", "USERNAME_RESOLUTION_RESTRICTED"}
+_OUTGOING_URL_RE = re.compile(r"https?://[^\s<>\"]+")
+_TRAILING_URL_PUNCTUATION = ".,;:!?)];"
 
 
 def set_ws_broadcast(fn):
@@ -334,6 +337,7 @@ def serialize_public_account(account: Account) -> dict:
         "auto_reply": account.auto_reply,
         "tdata_stored": has_secret(account.tdata_blob),
         "prompt_template_id": account.prompt_template_id,
+        "agent_pipeline_id": getattr(account, "agent_pipeline_id", None),
         "created_at": account.created_at,
         "proxy_host": account.proxy_host or "",
         "proxy_port": account.proxy_port,
@@ -654,6 +658,7 @@ async def _broadcast_conversation_message(conv: Conversation, text: str, *, paus
     payload = {
         "event": "new_message",
         "conversation_id": conv.id,
+        "project_id": conv.project_id,
         "account_id": conv.account_id,
         "text": text,
         "unread_count": conv.unread_count or 0,
@@ -674,6 +679,9 @@ def _ensure_outreach_conversation(
     tg_last_name: Optional[str] = None,
     source_campaign_id: Optional[int] = None,
 ) -> Conversation:
+    project_id = None
+    if source_campaign_id:
+        project_id = db.query(Campaign.project_id).filter(Campaign.id == source_campaign_id).scalar()
     conv = db.query(Conversation).filter(
         Conversation.account_id == account_id,
         Conversation.tg_user_id == tg_user_id,
@@ -685,6 +693,7 @@ def _ensure_outreach_conversation(
             tg_username=tg_username or "",
             tg_first_name=tg_first_name or "",
             tg_last_name=tg_last_name or "",
+            project_id=project_id,
             source_campaign_id=source_campaign_id,
             unread_count=0,
         )
@@ -700,6 +709,8 @@ def _ensure_outreach_conversation(
         conv.tg_last_name = tg_last_name
     if source_campaign_id and not conv.source_campaign_id:
         conv.source_campaign_id = source_campaign_id
+    if project_id and not conv.project_id:
+        conv.project_id = project_id
     return conv
 
 
@@ -721,8 +732,84 @@ def _record_outreach_message(
     return message
 
 
-def _auto_reply_delay_seconds() -> float:
-    return random.uniform(AUTO_REPLY_DELAY_MIN_S, AUTO_REPLY_DELAY_MAX_S)
+def _classify_auto_reply_task_type(inbound_text: str = "", reply_text: str = "") -> str:
+    text = f"{inbound_text}\n{reply_text}".lower()
+    if any(token in text for token in ("calendar.google.com", "слот", "встреч", "созвон", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00")):
+        return "booking"
+    if any(token in text for token in ("что за продукт", "кто вы", "почему", "зачем", "автоматизац", "бот")):
+        return "trust"
+    if len((inbound_text or "").strip()) <= 80 and "?" in inbound_text:
+        return "clarification"
+    return "trust"
+
+
+def _auto_reply_delay_seconds(
+    inbound_text: str = "",
+    reply_text: str = "",
+    task_type: Optional[str] = None,
+    jitter: Optional[float] = None,
+) -> float:
+    resolved_type = task_type or _classify_auto_reply_task_type(inbound_text, reply_text)
+    windows = {
+        "clarification": (12.0, 25.0),
+        "trust": (20.0, 45.0),
+        "scheduling": (12.0, 25.0),
+        "booking": (25.0, 60.0),
+    }
+    low, high = windows.get(resolved_type, (AUTO_REPLY_DELAY_MIN_S, AUTO_REPLY_DELAY_MAX_S))
+    factor = random.random() if jitter is None else max(0.0, min(1.0, float(jitter)))
+    inbound_adjustment = min(20.0, len(inbound_text or "") * 0.03)
+    delay = low + ((high - low) * factor) + inbound_adjustment
+    return min(90.0, delay)
+
+
+def _typing_duration_seconds(reply_text: str = "") -> float:
+    return max(3.0, min(18.0, len(reply_text or "") / 14.0))
+
+
+def _presence_timing(delay_s: float) -> dict:
+    if delay_s <= 0:
+        return {"read_delay_s": 0.0, "initial_typing_delay_s": 0.0, "initial_typing_s": 0.0}
+    read_delay = min(10.0, max(2.0, delay_s * 0.2))
+    typing_at = min(10.0, max(read_delay, delay_s * 0.35))
+    return {
+        "read_delay_s": read_delay,
+        "initial_typing_delay_s": max(0.0, typing_at - read_delay),
+        "initial_typing_s": 1.5,
+    }
+
+
+async def _mark_auto_reply_read(account_id: int, tg_user_id: str) -> bool:
+    client = _clients.get(account_id)
+    if not client:
+        return False
+    try:
+        await client.send_read_acknowledge(int(tg_user_id))
+        _log_auto_reply_event("read", account_id=account_id, tg_user_id=tg_user_id, read_at=_utcnow())
+        return True
+    except Exception as exc:
+        _log_auto_reply_event("read_failed", account_id=account_id, tg_user_id=tg_user_id, reason=str(exc))
+        return False
+
+
+async def _show_auto_reply_typing(account_id: int, tg_user_id: str, *, duration_s: float) -> bool:
+    client = _clients.get(account_id)
+    if not client:
+        return False
+    try:
+        async with client.action(int(tg_user_id), "typing"):
+            await asyncio.sleep(max(0.0, duration_s))
+        _log_auto_reply_event(
+            "typing",
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            duration_s=duration_s,
+            typing_at=_utcnow(),
+        )
+        return True
+    except Exception as exc:
+        _log_auto_reply_event("typing_failed", account_id=account_id, tg_user_id=tg_user_id, reason=str(exc))
+        return False
 
 
 def _log_auto_reply_event(event: str, **fields):
@@ -765,14 +852,6 @@ def _load_auto_reply_context(db, account_id: int, conversation_id: int, trigger_
     if _latest_user_message_id(db, conversation_id) != trigger_message_id:
         return None
 
-    provider = getattr(settings, "provider", "openai") or "openai"
-    openai_key = decrypt_value(settings.openai_key) if settings else ""
-    anthropic_key = decrypt_value(getattr(settings, "anthropic_key", "")) if settings else ""
-    if provider in ("openai", "openrouter") and not openai_key:
-        return None
-    if provider == "anthropic" and not anthropic_key:
-        return None
-
     source_campaign = None
     if conv.source_campaign_id:
         source_campaign = db.query(Campaign).filter(Campaign.id == conv.source_campaign_id).first()
@@ -788,6 +867,17 @@ def _load_auto_reply_context(db, account_id: int, conversation_id: int, trigger_
             source_campaign.prompt_template = db.query(PromptTemplate).filter(
                 PromptTemplate.id == source_campaign.prompt_template_id
             ).first()
+
+    from backend.pipeline_runner import resolve_agent_pipeline
+    agent_pipeline = resolve_agent_pipeline(db, account=account, campaign=source_campaign)
+
+    provider = getattr(settings, "provider", "openai") or "openai"
+    openai_key = decrypt_value(settings.openai_key) if settings else ""
+    anthropic_key = decrypt_value(getattr(settings, "anthropic_key", "")) if settings else ""
+    if not agent_pipeline and provider in ("openai", "openrouter") and not openai_key:
+        return None
+    if not agent_pipeline and provider == "anthropic" and not anthropic_key:
+        return None
 
     if account.prompt_template_id:
         from backend.models import PromptTemplate
@@ -812,11 +902,18 @@ def _load_auto_reply_context(db, account_id: int, conversation_id: int, trigger_
         "openai_key": openai_key or "",
         "anthropic_key": anthropic_key or "",
         "source_campaign": source_campaign,
+        "agent_pipeline": agent_pipeline,
         "history": history,
     }
 
 
-def _schedule_auto_reply(account_id: int, conversation_id: int, tg_user_id: str, trigger_message_id: int) -> float:
+def _schedule_auto_reply(
+    account_id: int,
+    conversation_id: int,
+    tg_user_id: str,
+    trigger_message_id: int,
+    inbound_text: str = "",
+) -> float:
     pending = _pending_auto_reply_tasks.get(conversation_id)
     if pending and not pending.done():
         pending.cancel()
@@ -830,7 +927,8 @@ def _schedule_auto_reply(account_id: int, conversation_id: int, tg_user_id: str,
         )
 
     scheduled_at = _utcnow()
-    delay_s = _auto_reply_delay_seconds()
+    task_type = _classify_auto_reply_task_type(inbound_text)
+    delay_s = _auto_reply_delay_seconds(inbound_text=inbound_text, task_type=task_type)
     send_after_at = scheduled_at + timedelta(seconds=delay_s)
     task = asyncio.create_task(
         _run_scheduled_auto_reply(
@@ -840,6 +938,8 @@ def _schedule_auto_reply(account_id: int, conversation_id: int, tg_user_id: str,
             trigger_message_id=trigger_message_id,
             delay_s=delay_s,
             scheduled_at=scheduled_at,
+            inbound_text=inbound_text,
+            task_type=task_type,
         )
     )
     task.trigger_message_id = trigger_message_id
@@ -855,6 +955,8 @@ def _schedule_auto_reply(account_id: int, conversation_id: int, tg_user_id: str,
         account_id=account_id,
         conversation_id=conversation_id,
         trigger_message_id=trigger_message_id,
+        task_type=task_type,
+        inbound_chars=len(inbound_text or ""),
         delay_s=delay_s,
         scheduled_at=scheduled_at,
         send_after_at=send_after_at,
@@ -869,9 +971,18 @@ async def _run_scheduled_auto_reply(
     trigger_message_id: int,
     delay_s: float,
     scheduled_at: datetime,
+    inbound_text: str = "",
+    task_type: str = "",
 ):
     try:
-        await asyncio.sleep(delay_s)
+        presence = _presence_timing(delay_s)
+        if presence["read_delay_s"]:
+            await asyncio.sleep(presence["read_delay_s"])
+        await _mark_auto_reply_read(account_id, tg_user_id)
+        if presence["initial_typing_delay_s"]:
+            await asyncio.sleep(presence["initial_typing_delay_s"])
+        if presence["initial_typing_s"]:
+            await _show_auto_reply_typing(account_id, tg_user_id, duration_s=presence["initial_typing_s"])
 
         db = SessionLocal()
         try:
@@ -890,24 +1001,65 @@ async def _run_scheduled_auto_reply(
             )
             return
 
-        system_prompt = _resolve_prompt(
-            context["settings"],
-            context["account"],
-            context["source_campaign"],
-        )
-        system_prompt = append_meeting_booking_instructions(system_prompt)
+        latest_inbound_text = inbound_text
+        if not latest_inbound_text:
+            for item in reversed(context.get("history") or []):
+                if getattr(item, "role", "") == "user":
+                    latest_inbound_text = item.text or ""
+                    break
 
-        from backend.gpt_handler import generate_reply
+        reply = ""
+        agent_pipeline = context.get("agent_pipeline")
+        if agent_pipeline:
+            from backend.pipeline_runner import run_pipeline_for_auto_reply
 
-        reply = await generate_reply(
-            provider=context["provider"],
-            openai_key=context["openai_key"],
-            anthropic_key=context["anthropic_key"],
-            base_url=getattr(context["settings"], "base_url", "") or "",
-            model=context["settings"].model,
-            system_prompt=system_prompt,
-            history=context["history"],
-        )
+            db = SessionLocal()
+            try:
+                pipeline_result = await run_pipeline_for_auto_reply(
+                    db,
+                    pipeline=agent_pipeline,
+                    conversation=context["conversation"],
+                    messages=context["history"],
+                    trigger_message_id=trigger_message_id,
+                )
+            finally:
+                db.close()
+            if not pipeline_result.get("ok"):
+                _log_auto_reply_event(
+                    "pipeline_blocked",
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    trigger_message_id=trigger_message_id,
+                    pipeline_id=getattr(agent_pipeline, "id", ""),
+                    reason=pipeline_result.get("error") or ",".join(pipeline_result.get("policy", {}).get("issues", [])),
+                )
+                await _emit_runtime_note(
+                    "auto_reply_skipped",
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    reason=pipeline_result.get("error") or "Agent pipeline заблокировал ответ",
+                )
+                return
+            reply = pipeline_result.get("reply_text") or ""
+        else:
+            system_prompt = _resolve_prompt(
+                context["settings"],
+                context["account"],
+                context["source_campaign"],
+            )
+            system_prompt = append_meeting_booking_instructions(system_prompt)
+
+            from backend.gpt_handler import generate_reply
+
+            reply = await generate_reply(
+                provider=context["provider"],
+                openai_key=context["openai_key"],
+                anthropic_key=context["anthropic_key"],
+                base_url=getattr(context["settings"], "base_url", "") or "",
+                model=context["settings"].model,
+                system_prompt=system_prompt,
+                history=context["history"],
+            )
         if not reply:
             _log_auto_reply_event(
                 "skipped",
@@ -925,6 +1077,10 @@ async def _run_scheduled_auto_reply(
                 reason="AI не вернул ответ",
             )
             return
+
+        resolved_task_type = task_type or _classify_auto_reply_task_type(latest_inbound_text, reply)
+        final_delay_s = delay_s
+        typing_duration_s = _typing_duration_seconds(reply)
 
         db = SessionLocal()
         try:
@@ -968,13 +1124,28 @@ async def _run_scheduled_auto_reply(
         finally:
             db.close()
 
+        elapsed_presence_s = (
+            presence["read_delay_s"]
+            + presence["initial_typing_delay_s"]
+            + presence["initial_typing_s"]
+            + typing_duration_s
+        )
+        await _show_auto_reply_typing(account_id, tg_user_id, duration_s=typing_duration_s)
+        remaining_delay_s = max(0.0, final_delay_s - elapsed_presence_s)
+        if remaining_delay_s:
+            await asyncio.sleep(remaining_delay_s)
+
         sending_at = _utcnow()
         _log_auto_reply_event(
             "sending",
             account_id=account_id,
             conversation_id=conversation_id,
             trigger_message_id=trigger_message_id,
-            delay_s=delay_s,
+            task_type=resolved_task_type,
+            inbound_chars=len(latest_inbound_text or ""),
+            reply_chars=len(reply or ""),
+            delay_s=final_delay_s,
+            typing_duration_s=typing_duration_s,
             scheduled_at=scheduled_at,
             sending_at=sending_at,
         )
@@ -1002,7 +1173,8 @@ async def _run_scheduled_auto_reply(
             account_id=account_id,
             conversation_id=conversation_id,
             trigger_message_id=trigger_message_id,
-            delay_s=delay_s,
+            task_type=resolved_task_type,
+            delay_s=final_delay_s,
             scheduled_at=scheduled_at,
             sending_at=sending_at,
             sent_at=_utcnow(),
@@ -1153,6 +1325,7 @@ async def _handle_message(account_id: int, event):
             conversation_id=conv.id,
             tg_user_id=tg_user_id,
             trigger_message_id=incoming_message.id,
+            inbound_text=text,
         )
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)
@@ -1704,26 +1877,84 @@ async def send_manual_message(account_id: int, tg_user_id: str, conversation_id:
         client = _clients.get(account_id)
     if not client:
         return {"ok": False, "error": "Account is not connected"}
-    await client.send_message(int(tg_user_id), text)
+    send_text, persisted_text, send_kwargs = _prepare_telegram_outgoing_text(text)
+    try:
+        await client.send_message(int(tg_user_id), send_text, **send_kwargs)
+    except ValueError as exc:
+        entity = await _resolve_conversation_entity_for_send(client, conversation_id)
+        if entity is None:
+            logger.warning(
+                "manual_send_entity_resolution_failed account_id=%s conversation_id=%s tg_user_id=%s reason=%s",
+                account_id,
+                conversation_id,
+                tg_user_id,
+                exc,
+            )
+            return {"ok": False, "error": str(exc)}
+        await client.send_message(entity, send_text, **send_kwargs)
     _clear_error(account_id, connection_state="online", last_seen_online_at=_utcnow())
     conv = _persist_outgoing_outreach_message(
         account_id=account_id,
         conversation_id=conversation_id,
         tg_user_id=tg_user_id,
-        text=text,
+        text=persisted_text,
     )
     if _ws_broadcast:
         if conv:
-            await _broadcast_conversation_message(conv, text)
+            await _broadcast_conversation_message(conv, persisted_text)
         await _ws_broadcast(
             {
                 "event": "manual_message_sent",
                 "conversation_id": conversation_id,
                 "account_id": account_id,
-                "text": text,
+                "text": persisted_text,
             }
         )
     return {"ok": True, "conversation_id": conv.id if conv else conversation_id}
+
+
+def _prepare_telegram_outgoing_text(text: str) -> tuple[str, str, dict]:
+    """Render visible URLs as a compact clickable "ссылка" label in Telegram."""
+    source = text or ""
+    matches = list(_OUTGOING_URL_RE.finditer(source))
+    if not matches:
+        return source, source, {}
+
+    html_parts = []
+    visible_parts = []
+    cursor = 0
+    for match in matches:
+        html_parts.append(html.escape(source[cursor:match.start()]))
+        visible_parts.append(source[cursor:match.start()])
+
+        raw_url = match.group(0)
+        url = raw_url.rstrip(_TRAILING_URL_PUNCTUATION)
+        trailing = raw_url[len(url):]
+        if not url:
+            html_parts.append(html.escape(raw_url))
+            visible_parts.append(raw_url)
+        else:
+            html_parts.append(f'<a href="{html.escape(url, quote=True)}">ссылка</a>')
+            html_parts.append(html.escape(trailing))
+            visible_parts.append("ссылка")
+            visible_parts.append(trailing)
+        cursor = match.end()
+
+    html_parts.append(html.escape(source[cursor:]))
+    visible_parts.append(source[cursor:])
+    return "".join(html_parts), "".join(visible_parts), {"parse_mode": "html"}
+
+
+async def _resolve_conversation_entity_for_send(client, conversation_id: int):
+    db = SessionLocal()
+    try:
+        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        username = (conv.tg_username or "").strip().lstrip("@") if conv else ""
+    finally:
+        db.close()
+    if not username:
+        return None
+    return await client.get_entity(username)
 
 
 # ── Campaign worker ──────────────────────────────────────────────

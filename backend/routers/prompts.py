@@ -5,11 +5,13 @@ from typing import Optional
 
 from backend.database import get_db
 from backend.models import PromptTemplate
+from backend.projects import resolve_project_id
 
 router = APIRouter(prefix="/api/prompts", tags=["prompts"])
 
 
 class PromptCreate(BaseModel):
+    project_id: Optional[int] = None
     name: str
     description: Optional[str] = None
     system_prompt: str
@@ -22,13 +24,17 @@ class PromptUpdate(BaseModel):
 
 
 @router.get("/")
-def list_prompts(db: Session = Depends(get_db)):
-    return db.query(PromptTemplate).order_by(PromptTemplate.created_at.desc()).all()
+def list_prompts(project_id: Optional[int] = None, db: Session = Depends(get_db)):
+    q = db.query(PromptTemplate)
+    if project_id is not None:
+        q = q.filter(PromptTemplate.project_id == int(project_id))
+    return q.order_by(PromptTemplate.created_at.desc()).all()
 
 
 @router.post("/")
 def create_prompt(data: PromptCreate, db: Session = Depends(get_db)):
     p = PromptTemplate(
+        project_id=resolve_project_id(db, data.project_id),
         name=data.name,
         description=data.description,
         system_prompt=data.system_prompt,

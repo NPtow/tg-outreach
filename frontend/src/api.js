@@ -31,8 +31,22 @@ async function req(method, path, body) {
   return r.json();
 }
 
+function withProject(path, projectId) {
+  if (!projectId) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}project_id=${encodeURIComponent(projectId)}`;
+}
+
 export const api = {
   getRuntimeStatus: () => req("GET", "/api/runtime/status"),
+
+  // Projects
+  getProjects: () => req("GET", "/api/projects/"),
+  createProject: (data) => req("POST", "/api/projects/", data),
+  updateProject: (id, data) => req("PATCH", `/api/projects/${id}`, data),
+  getProjectResources: (id) => req("GET", `/api/projects/${id}/resources`),
+  attachProjectAccount: (projectId, accountId) => req("POST", `/api/projects/${projectId}/accounts/${accountId}/attach`),
+  attachProjectProxy: (projectId, proxyId) => req("POST", `/api/projects/${projectId}/proxies/${proxyId}/attach`),
 
   // Accounts
   getAccounts: () => req("GET", "/api/accounts/"),
@@ -71,8 +85,43 @@ export const api = {
   markRead: (id) => req("POST", `/api/conversations/${id}/mark-read`),
   toggleHot: (id) => req("PATCH", `/api/conversations/${id}/hot`),
 
+  // Agent Lab
+  getAgentRuns: (params = {}) => {
+    const q = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v !== undefined && v !== "" && v !== null)
+    ).toString();
+    return req("GET", `/api/agents/runs${q ? "?" + q : ""}`);
+  },
+  getScenarios: (status = "", projectId) => {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (projectId) params.set("project_id", projectId);
+    const qs = params.toString();
+    return req("GET", `/api/scenarios/${qs ? `?${qs}` : ""}`);
+  },
+  getGroupedScenarios: (status = "", projectId) => {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (projectId) params.set("project_id", projectId);
+    const qs = params.toString();
+    return req("GET", `/api/scenarios/grouped${qs ? `?${qs}` : ""}`);
+  },
+  seedFounderResearchPack: (projectId) => req("POST", withProject("/api/scenarios/seed-founder-research-pack", projectId)),
+  analyzeConversationsForScenarios: (limit = 50, projectId) => {
+    const path = `/api/scenarios/analyze-conversations?limit=${limit}`;
+    return req("POST", withProject(path, projectId));
+  },
+  getDifyStatus: () => req("GET", "/api/scenarios/dify/status"),
+  syncDifyScenarios: (status = "active") => req("POST", `/api/scenarios/dify/sync?status=${status}`),
+  legacyFounderResearchPack: () => req("POST", "/api/scenarios/legacy/founder-research-pack"),
+  createScenario: (data) => req("POST", "/api/scenarios/", data),
+  activateScenario: (id) => req("POST", `/api/scenarios/${id}/activate`),
+  mineScenario: (conversation_id) => req("POST", `/api/scenarios/mine?conversation_id=${conversation_id}`),
+  replaySandbox: (data) => req("POST", "/api/sandbox/replay", data),
+  runEvals: (cases) => req("POST", "/api/evals/run", cases ? { cases } : {}),
+
   // Campaigns
-  getCampaigns: () => req("GET", "/api/campaigns/"),
+  getCampaigns: (projectId) => req("GET", withProject("/api/campaigns/", projectId)),
   createCampaign: (data) => req("POST", "/api/campaigns/", data),
   startCampaign: (id) => req("POST", `/api/campaigns/${id}/start`),
   pauseCampaign: (id) => req("POST", `/api/campaigns/${id}/pause`),
@@ -82,10 +131,21 @@ export const api = {
   deleteCampaign: (id) => req("DELETE", `/api/campaigns/${id}`),
 
   // Prompts
-  getPrompts: () => req("GET", "/api/prompts/"),
+  getPrompts: (projectId) => req("GET", withProject("/api/prompts/", projectId)),
   createPrompt: (data) => req("POST", "/api/prompts/", data),
   updatePrompt: (id, data) => req("PUT", `/api/prompts/${id}`, data),
   deletePrompt: (id) => req("DELETE", `/api/prompts/${id}`),
+
+  // Agent Pipelines
+  getPipelines: (projectId) => req("GET", withProject("/api/agent-pipelines/", projectId)),
+  createPipeline: (data) => req("POST", "/api/agent-pipelines/", data),
+  updatePipeline: (id, data) => req("PUT", `/api/agent-pipelines/${id}`, data),
+  archivePipeline: (id) => req("DELETE", `/api/agent-pipelines/${id}`),
+  replayPipeline: (id, data) => req("POST", `/api/agent-pipelines/${id}/replay`, data),
+  listN8nWorkflows: (data) => req("POST", "/api/agent-pipelines/n8n/workflows", data),
+  getN8nWorkflow: (data, workflow_id) => req("POST", `/api/agent-pipelines/n8n/workflows/get?workflow_id=${encodeURIComponent(workflow_id)}`, data),
+  importN8nWorkflow: (data) => req("POST", "/api/agent-pipelines/n8n/workflows/import", data),
+  bindN8nWorkflow: (id, data) => req("POST", `/api/agent-pipelines/${id}/bind-n8n-workflow`, data),
 
   // Do Not Contact
   getDNC: () => req("GET", "/api/dnc/"),
@@ -93,17 +153,18 @@ export const api = {
   removeDNC: (id) => req("DELETE", `/api/dnc/${id}`),
 
   // Contacts
-  getContactBatches: () => req("GET", "/api/contacts/batches/"),
+  getContactBatches: (projectId) => req("GET", withProject("/api/contacts/batches/", projectId)),
   deleteContactBatch: (id) => req("DELETE", `/api/contacts/batches/${id}`),
-  getContacts: (search, batch_id) => {
+  getContacts: (search, batch_id, projectId) => {
     const params = new URLSearchParams();
     if (search) params.set("search", search);
     if (batch_id !== undefined && batch_id !== null) params.set("batch_id", batch_id);
+    if (projectId) params.set("project_id", projectId);
     const qs = params.toString();
     return req("GET", `/api/contacts/${qs ? "?" + qs : ""}`);
   },
   createContact: (data) => req("POST", "/api/contacts/", data),
-  importContacts: (csv_text, batch_name = "") => req("POST", "/api/contacts/import", { csv_text, batch_name }),
+  importContacts: (csv_text, batch_name = "", projectId) => req("POST", "/api/contacts/import", { csv_text, batch_name, project_id: projectId }),
   deleteContact: (id) => req("DELETE", `/api/contacts/${id}`),
   bulkDeleteContacts: (ids) => req("DELETE", "/api/contacts/bulk", { ids }),
 

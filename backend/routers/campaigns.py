@@ -7,7 +7,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import Campaign, CampaignTarget
+from backend.models import AgentPipeline, Campaign, CampaignTarget
+from backend.projects import resolve_project_id
 from backend.runtime_config import owns_telegram_runtime
 from backend.worker_client import forward_to_worker
 import backend.telegram_client as tg
@@ -19,6 +20,7 @@ router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
 class CampaignCreate(BaseModel):
     name: str
+    project_id: Optional[int] = None
     account_ids: List[int]           # one or more accounts
     messages: List[str]
     targets: List[str]               # "username" or "username,name,company,role,note"
@@ -29,6 +31,7 @@ class CampaignCreate(BaseModel):
     send_hour_to: int = 21
     send_window_enabled: bool = False
     prompt_template_id: Optional[int] = None
+    agent_pipeline_id: Optional[int] = None
     stop_on_reply: bool = False
     stop_keywords: Optional[str] = None   # comma-separated
     hot_keywords: Optional[str] = None    # comma-separated
@@ -36,9 +39,12 @@ class CampaignCreate(BaseModel):
 
 
 @router.get("/")
-def list_campaigns(db: Session = Depends(get_db)):
+def list_campaigns(project_id: Optional[int] = None, db: Session = Depends(get_db)):
     try:
-        campaigns = db.query(Campaign).order_by(Campaign.created_at.desc()).all()
+        q = db.query(Campaign)
+        if project_id is not None:
+            q = q.filter(Campaign.project_id == int(project_id))
+        campaigns = q.order_by(Campaign.created_at.desc()).all()
         result = []
         for c in campaigns:
             total = db.query(CampaignTarget).filter(CampaignTarget.campaign_id == c.id).count()
@@ -55,6 +61,7 @@ def list_campaigns(db: Session = Depends(get_db)):
             is_running = tg.campaign_is_running(c.id) if owns_telegram_runtime() else c.status == "running"
             result.append({
                 "id": c.id,
+                "project_id": c.project_id,
                 "name": c.name,
                 "account_id": c.account_id,
                 "account_ids": acc_ids,
@@ -67,6 +74,11 @@ def list_campaigns(db: Session = Depends(get_db)):
                 "send_hour_to": c.send_hour_to,
                 "send_window_enabled": bool(c.send_window_enabled),
                 "prompt_template_id": c.prompt_template_id,
+                "agent_pipeline_id": c.agent_pipeline_id,
+                "agent_pipeline_name": (
+                    db.query(AgentPipeline.name).filter(AgentPipeline.id == c.agent_pipeline_id).scalar()
+                    if c.agent_pipeline_id else None
+                ),
                 "stop_on_reply": bool(c.stop_on_reply),
                 "stop_keywords": c.stop_keywords or "",
                 "hot_keywords": c.hot_keywords or "",
@@ -93,6 +105,7 @@ def create_campaign(data: CampaignCreate, db: Session = Depends(get_db)):
         raise HTTPException(400, "Need at least one account")
 
     c = Campaign(
+        project_id=resolve_project_id(db, data.project_id),
         name=data.name,
         account_id=data.account_ids[0],          # primary account (for compat)
         account_ids=json.dumps(data.account_ids),
@@ -104,6 +117,7 @@ def create_campaign(data: CampaignCreate, db: Session = Depends(get_db)):
         send_hour_to=data.send_hour_to,
         send_window_enabled=data.send_window_enabled,
         prompt_template_id=data.prompt_template_id,
+        agent_pipeline_id=data.agent_pipeline_id,
         stop_on_reply=data.stop_on_reply,
         stop_keywords=data.stop_keywords,
         hot_keywords=data.hot_keywords,

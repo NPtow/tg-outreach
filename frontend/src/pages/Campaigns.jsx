@@ -25,17 +25,17 @@ function Modal({ title, onClose, children }) {
 }
 
 // ── Contact picker modal (two-level: batches → contacts) ────────────────────
-function ContactPicker({ onClose, onSelect }) {
+function ContactPicker({ projectId, onClose, onSelect }) {
   const [batches, setBatches] = useState([]);
   const [activeBatch, setActiveBatch] = useState(null); // null = batch list
   const [contacts, setContacts] = useState([]);
   const [search, setSearch] = useState("");
   const [picked, setPicked] = useState(new Set()); // contact ids
 
-  useEffect(() => { api.getContactBatches().then(setBatches); }, []);
+  useEffect(() => { api.getContactBatches(projectId).then(setBatches); }, [projectId]);
 
   const loadContacts = (batchId) => {
-    api.getContacts("", batchId).then(setContacts);
+    api.getContacts("", batchId, projectId).then(setContacts);
   };
 
   const drillIn = (batch) => {
@@ -45,7 +45,7 @@ function ContactPicker({ onClose, onSelect }) {
   };
 
   const selectAllBatch = (batch) => {
-    api.getContacts("", batch.id).then(cs => {
+    api.getContacts("", batch.id, projectId).then(cs => {
       setPicked(prev => {
         const n = new Set(prev);
         cs.forEach(c => n.add(c.id));
@@ -198,14 +198,14 @@ function ContactPicker({ onClose, onSelect }) {
 }
 
 // ── Create Campaign modal ────────────────────────────────────────
-function CreateModal({ accounts, prompts, onClose, onCreated }) {
+function CreateModal({ projectId, accounts, pipelines, onClose, onCreated }) {
   const [form, setForm] = useState({
     name: "",
     account_ids: [],
     delay_min: 30, delay_max: 90, daily_limit: 20,
     send_window_enabled: false,
     send_hour_from: 9, send_hour_to: 21,
-    prompt_template_id: "",
+    agent_pipeline_id: "",
     stop_on_reply: false,
     stop_keywords: "",
     hot_keywords: "",
@@ -259,7 +259,8 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
     try {
       await api.createCampaign({
         ...form,
-        prompt_template_id: form.prompt_template_id ? Number(form.prompt_template_id) : null,
+        project_id: projectId,
+        agent_pipeline_id: form.agent_pipeline_id ? Number(form.agent_pipeline_id) : null,
         max_messages: form.max_messages ? Number(form.max_messages) : null,
         messages,
         targets,
@@ -312,17 +313,18 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
           )}
         </div>
 
-        {/* Prompt selector */}
+        {/* Agent pipeline selector */}
         <div>
           <label className="text-xs font-medium text-zinc-400 block mb-1.5">
-            Промпт агента <span className="text-zinc-600 font-normal">— для авто-ответов на входящие</span>
+            Agent pipeline <span className="text-zinc-600 font-normal">— для live auto-reply на входящие</span>
           </label>
-          <select className={inputCls} value={form.prompt_template_id} onChange={e => setForm({...form, prompt_template_id: e.target.value})}>
-            <option value="">— глобальный (из Settings) —</option>
-            {prompts.map(p => (
-              <option key={p.id} value={p.id}>{p.name}</option>
+          <select className={inputCls} value={form.agent_pipeline_id} onChange={e => setForm({...form, agent_pipeline_id: e.target.value})}>
+            <option value="">— legacy prompt fallback —</option>
+            {pipelines.filter(p => p.status === "active").map(p => (
+              <option key={p.id} value={p.id}>{p.name} · {p.type}</option>
             ))}
           </select>
+          <p className="text-[11px] text-zinc-600 mt-1.5">Если выбран pipeline, он побеждает старые промпты кампании.</p>
         </div>
 
         {/* Messages */}
@@ -458,25 +460,25 @@ function CreateModal({ accounts, prompts, onClose, onCreated }) {
       </div>
 
       {showPicker && (
-        <ContactPicker onClose={() => setShowPicker(false)} onSelect={handlePickerSelect} />
+        <ContactPicker projectId={projectId} onClose={() => setShowPicker(false)} onSelect={handlePickerSelect} />
       )}
     </Modal>
   );
 }
 
-export default function Campaigns() {
+export default function Campaigns({ projectId }) {
   const [campaigns, setCampaigns] = useState([]);
   const [accounts, setAccounts] = useState([]);
-  const [prompts, setPrompts] = useState([]);
+  const [pipelines, setPipelines] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [startErrors, setStartErrors] = useState({});
-  const load = () => api.getCampaigns().then(setCampaigns);
+  const load = () => api.getCampaigns(projectId).then(setCampaigns);
 
   useEffect(() => {
     load();
     api.getAccounts().then(setAccounts);
-    api.getPrompts().then(setPrompts);
-  }, []);
+    api.getPipelines(projectId).then(setPipelines);
+  }, [projectId]);
   useWsEvent(msg => { if (msg.event === "campaign_progress") load(); });
 
   const handleStart = async id => {
@@ -539,7 +541,7 @@ export default function Campaigns() {
           {campaigns.map(c => {
             const pct = c.total ? Math.round((c.sent / c.total) * 100) : 0;
             const st = STATUS[c.status] || STATUS.draft;
-            const promptName = prompts.find(p => p.id === c.prompt_template_id)?.name;
+            const pipelineName = c.agent_pipeline_name || pipelines.find(p => p.id === c.agent_pipeline_id)?.name;
             return (
               <Surface key={c.id} className="p-5 transition-colors hover:border-white/16">
                 <div className="flex items-start justify-between gap-4 mb-3">
@@ -548,8 +550,8 @@ export default function Campaigns() {
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <p className="font-medium text-zinc-100 text-sm">{c.name}</p>
-                        {promptName && (
-                          <span className="text-[10px] bg-violet-500/15 text-violet-400 px-1.5 py-0.5 rounded-full shrink-0">{promptName}</span>
+                        {pipelineName && (
+                          <span className="text-[10px] bg-blue-500/15 text-blue-300 px-1.5 py-0.5 rounded-full shrink-0">{pipelineName}</span>
                         )}
                         {c.stop_on_reply && (
                           <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full shrink-0">⏸ reply</span>
@@ -610,7 +612,7 @@ export default function Campaigns() {
       )}
 
       {showModal && (
-        <CreateModal accounts={accounts} prompts={prompts} onClose={() => setShowModal(false)}
+        <CreateModal projectId={projectId} accounts={accounts} pipelines={pipelines} onClose={() => setShowModal(false)}
           onCreated={() => { setShowModal(false); load(); }} />
       )}
     </div>

@@ -1,29 +1,32 @@
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import Accounts from "./pages/Accounts";
+import AgentsLab from "./pages/AgentsLab";
 import Campaigns from "./pages/Campaigns";
 import Contacts from "./pages/Contacts";
 import Conversations from "./pages/Conversations";
 import Prompts from "./pages/Prompts";
 import ProxyPool from "./pages/ProxyPool";
 import Settings from "./pages/Settings";
+import { api } from "./api";
 import { useWS, useWsStatus } from "./ws";
 
 const NAV = [
-  { to: "/", label: "Inbox", icon: "💬", end: true, eyebrow: "Conversation Ops", blurb: "Monitor live replies, hot leads, and manual interventions." },
-  { to: "/accounts", label: "Accounts", icon: "👤", eyebrow: "Runtime", blurb: "Track Telegram account health, sessions, proxies, and campaign readiness." },
-  { to: "/campaigns", label: "Campaigns", icon: "📢", eyebrow: "Execution", blurb: "Launch conservative outreach waves with strict pacing and reply stops." },
-  { to: "/contacts", label: "Contacts", icon: "👥", eyebrow: "Audience", blurb: "Keep imported prospect batches searchable, editable, and campaign-ready." },
-  { to: "/prompts", label: "Prompts", icon: "🧠", eyebrow: "AI Layer", blurb: "Store reusable prompt packs for account- and campaign-level agents." },
-  { to: "/proxies", label: "Proxies", icon: "🔌", eyebrow: "Infrastructure", blurb: "Manage shared proxy pool. One proxy per account." },
-  { to: "/settings", label: "Settings", icon: "⚙️", eyebrow: "Control Plane", blurb: "Configure provider credentials, default prompts, and auto-reply behavior." },
+  { to: "/", label: "Входящие", icon: "💬", end: true, eyebrow: "Диалоги", blurb: "Живые ответы, горячие лиды и ручные вмешательства." },
+  { to: "/accounts", label: "Аккаунты", icon: "👤", eyebrow: "Подключение", blurb: "Здоровье Telegram-аккаунтов, сессии, прокси и готовность к рассылке." },
+  { to: "/campaigns", label: "Кампании", icon: "📢", eyebrow: "Запуск", blurb: "Осторожные волны рассылки с лимитами и остановкой при ответе." },
+  { to: "/contacts", label: "Контакты", icon: "👥", eyebrow: "Аудитория", blurb: "Импортированные списки контактов для кампаний." },
+  { to: "/prompts", label: "Пайплайны", icon: "🧩", eyebrow: "Слой ИИ", blurb: "Agent pipelines для автоответов и кампаний." },
+  { to: "/agents", label: "Агенты", icon: "А", eyebrow: "Лаборатория агента", blurb: "Проверка переписок, сценарии и локальные проверки качества." },
+  { to: "/proxies", label: "Прокси", icon: "🔌", eyebrow: "Инфраструктура", blurb: "Общий пул прокси: один прокси на аккаунт." },
+  { to: "/settings", label: "Настройки", icon: "⚙️", eyebrow: "Панель управления", blurb: "Ключи провайдеров, базовые инструкции и автоответы." },
 ];
 
 const WS_STATE = {
-  connected: { label: "Live sync online", cls: "border-emerald-400/20 bg-emerald-400/10 text-emerald-200" },
-  connecting: { label: "Connecting live sync", cls: "border-sky-400/20 bg-sky-400/10 text-sky-200" },
-  reconnecting: { label: "Reconnecting", cls: "border-amber-400/20 bg-amber-400/10 text-amber-200" },
-  error: { label: "Live sync interrupted", cls: "border-rose-400/20 bg-rose-400/10 text-rose-200" },
+  connected: { label: "Синхронизация включена", cls: "border-emerald-400/20 bg-emerald-400/10 text-emerald-200" },
+  connecting: { label: "Подключение синхронизации", cls: "border-sky-400/20 bg-sky-400/10 text-sky-200" },
+  reconnecting: { label: "Переподключение", cls: "border-amber-400/20 bg-amber-400/10 text-amber-200" },
+  error: { label: "Синхронизация прервана", cls: "border-rose-400/20 bg-rose-400/10 text-rose-200" },
 };
 
 function ErrorToast() {
@@ -47,7 +50,7 @@ function ErrorToast() {
       {errors.map((err) => (
         <div key={err.id} className="overflow-hidden rounded-2xl border border-rose-400/25 bg-zinc-950/95 shadow-[0_24px_60px_rgba(0,0,0,0.4)] backdrop-blur-xl">
           <div className="flex items-center gap-2 border-b border-rose-400/15 bg-rose-400/10 px-4 py-3">
-            <span className="text-xs font-semibold uppercase tracking-[0.18em] text-rose-200">API error {err.status && `· ${err.status}`}</span>
+            <span className="text-xs font-semibold uppercase tracking-[0.18em] text-rose-200">Ошибка API {err.status && `· ${err.status}`}</span>
             {err.url ? <span className="ml-auto truncate text-[11px] font-mono text-zinc-500">{err.url}</span> : null}
             <button
               onClick={() => setErrors((prev) => prev.filter((x) => x.id !== err.id))}
@@ -63,7 +66,7 @@ function ErrorToast() {
               title="Копировать"
               className="shrink-0 rounded-lg border border-white/10 bg-white/4 px-2 py-1 text-[11px] uppercase tracking-[0.16em] text-zinc-300 transition-colors hover:bg-white/8"
             >
-              Copy
+              Копировать
             </button>
           </div>
         </div>
@@ -87,8 +90,8 @@ function Sidebar({ pathname, onNavigate, mobile }) {
               TG
             </div>
             <div>
-              <div className="text-base font-semibold tracking-tight text-white">Outreach</div>
-              <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">Operator workspace</div>
+              <div className="text-base font-semibold tracking-tight text-white">Рассылка</div>
+              <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">Рабочее место оператора</div>
             </div>
           </div>
           {mobile ? (
@@ -103,17 +106,17 @@ function Sidebar({ pathname, onNavigate, mobile }) {
 
         <div className="mt-4 grid grid-cols-2 gap-2 text-[11px] uppercase tracking-[0.18em] text-zinc-500">
           <div className="rounded-2xl border border-white/8 bg-black/20 px-3 py-2">
-            <div>Mode</div>
-            <div className="mt-1 text-sm tracking-normal text-zinc-200">Local</div>
+            <div>Режим</div>
+            <div className="mt-1 text-sm tracking-normal text-zinc-200">Локально</div>
           </div>
           <div className="rounded-2xl border border-white/8 bg-black/20 px-3 py-2">
-            <div>Scope</div>
-            <div className="mt-1 text-sm tracking-normal text-zinc-200">TG ops</div>
+            <div>Зона</div>
+            <div className="mt-1 text-sm tracking-normal text-zinc-200">Telegram</div>
           </div>
         </div>
       </div>
 
-      <div className="mt-6 text-[11px] uppercase tracking-[0.22em] text-zinc-600">Workspace</div>
+      <div className="mt-6 text-[11px] uppercase tracking-[0.22em] text-zinc-600">Разделы</div>
       <nav className="mt-3 space-y-1.5">
         {NAV.map((item) => {
           const active = isActivePath(pathname, item);
@@ -144,11 +147,33 @@ function Sidebar({ pathname, onNavigate, mobile }) {
       </nav>
 
       <div className="mt-auto rounded-[24px] border border-white/10 bg-white/[0.03] px-4 py-4">
-        <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-600">Build</div>
-        <div className="mt-2 text-sm text-zinc-300">v1.0 local runtime</div>
-        <p className="mt-2 text-xs leading-5 text-zinc-500">Built for conservative Telegram outreach with live inbox monitoring, account health, and controlled warm-up.</p>
+        <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-600">Сборка</div>
+        <div className="mt-2 text-sm text-zinc-300">v1.0 локально</div>
+        <p className="mt-2 text-xs leading-5 text-zinc-500">Для осторожной Telegram-рассылки с контролем входящих, здоровья аккаунтов и прогрева.</p>
       </div>
     </aside>
+  );
+}
+
+function ProjectSwitcher({ projects, activeProjectId, onChange, onCreate }) {
+  return (
+    <div className="flex items-center gap-2">
+      <select
+        className="h-10 min-w-[210px] rounded-2xl border border-white/10 bg-black/35 px-3 text-sm text-zinc-100 outline-none transition focus:border-sky-400/40"
+        value={activeProjectId || ""}
+        onChange={(event) => onChange(Number(event.target.value))}
+      >
+        {projects.map((project) => (
+          <option key={project.id} value={project.id}>{project.name}</option>
+        ))}
+      </select>
+      <button
+        onClick={onCreate}
+        className="h-10 rounded-2xl border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.07]"
+      >
+        + Project
+      </button>
+    </div>
   );
 }
 
@@ -157,12 +182,41 @@ function WorkspaceFrame() {
   const pathname = useLocation().pathname;
   const wsStatus = useWsStatus();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [projects, setProjects] = useState([]);
+  const [activeProjectId, setActiveProjectId] = useState(() => Number(localStorage.getItem("tg_active_project_id") || 0));
   const current = useMemo(() => NAV.find((item) => isActivePath(pathname, item)) || NAV[0], [pathname]);
   const liveMeta = WS_STATE[wsStatus] || WS_STATE.connecting;
+
+  const loadProjects = () => {
+    api.getProjects().then((items) => {
+      setProjects(items);
+      const saved = Number(localStorage.getItem("tg_active_project_id") || 0);
+      const next = items.find((item) => item.id === saved)?.id || items[0]?.id || 0;
+      setActiveProjectId(next);
+      if (next) localStorage.setItem("tg_active_project_id", String(next));
+    });
+  };
 
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
+
+  useEffect(() => {
+    loadProjects();
+  }, []);
+
+  const switchProject = (projectId) => {
+    setActiveProjectId(projectId);
+    localStorage.setItem("tg_active_project_id", String(projectId));
+  };
+
+  const createProject = async () => {
+    const name = prompt("Название проекта");
+    if (!name?.trim()) return;
+    const project = await api.createProject({ name: name.trim() });
+    await loadProjects();
+    switchProject(project.id);
+  };
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#07080d] text-zinc-100">
@@ -203,9 +257,15 @@ function WorkspaceFrame() {
               </div>
 
               <div className="hidden items-center gap-2 lg:flex">
+                <ProjectSwitcher
+                  projects={projects}
+                  activeProjectId={activeProjectId}
+                  onChange={switchProject}
+                  onCreate={createProject}
+                />
                 <div className={`rounded-full border px-3 py-1.5 text-xs font-medium ${liveMeta.cls}`}>{liveMeta.label}</div>
                 <div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-zinc-300">
-                  Safe pacing enabled
+                  Безопасный темп включен
                 </div>
               </div>
             </div>
@@ -214,11 +274,12 @@ function WorkspaceFrame() {
           <main className="flex-1">
             <div className="mx-auto w-full max-w-[1600px] px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
               <Routes>
-                <Route path="/" element={<Conversations />} />
+                <Route path="/" element={<Conversations projectId={activeProjectId} />} />
                 <Route path="/accounts" element={<Accounts />} />
-                <Route path="/campaigns" element={<Campaigns />} />
-                <Route path="/contacts" element={<Contacts />} />
-                <Route path="/prompts" element={<Prompts />} />
+                <Route path="/campaigns" element={<Campaigns projectId={activeProjectId} />} />
+                <Route path="/contacts" element={<Contacts projectId={activeProjectId} />} />
+                <Route path="/prompts" element={<Prompts projectId={activeProjectId} />} />
+                <Route path="/agents" element={<AgentsLab projectId={activeProjectId} />} />
                 <Route path="/proxies" element={<ProxyPool />} />
                 <Route path="/settings" element={<Settings />} />
               </Routes>

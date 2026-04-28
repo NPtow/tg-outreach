@@ -25,7 +25,7 @@ def get_db():
 
 
 def init_db():
-    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, DoNotContact, Contact, ContactBatch, RuntimeEvent, ProxyPool, Integration, ScheduledMeeting  # noqa
+    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, AgentPipeline, AgentPipelineVersion, DoNotContact, Contact, ContactBatch, RuntimeEvent, ProxyPool, Integration, ScheduledMeeting, AgentRun, ScenarioCard, Project, ProjectAccount, ProjectProxy  # noqa
     Base.metadata.create_all(bind=engine)
 
     # Add new columns to existing tables (safe to re-run — errors for existing columns are swallowed)
@@ -41,6 +41,7 @@ def init_db():
         ("accounts", "proxy_user TEXT"),
         ("accounts", "proxy_pass TEXT"),
         ("accounts", "prompt_template_id INTEGER"),
+        ("accounts", "agent_pipeline_id INTEGER"),
         ("accounts", "connection_state TEXT DEFAULT 'offline'"),
         ("accounts", "proxy_state TEXT DEFAULT 'unknown'"),
         ("accounts", "session_state TEXT DEFAULT 'missing'"),
@@ -54,10 +55,12 @@ def init_db():
         ("accounts", "session_source TEXT"),
         ("accounts", "proxy_last_rtt_ms INTEGER"),
         # campaigns
+        ("campaigns", "project_id INTEGER"),
         ("campaigns", "account_ids TEXT"),
         ("campaigns", "send_hour_from INTEGER DEFAULT 9"),
         ("campaigns", "send_hour_to INTEGER DEFAULT 21"),
         ("campaigns", "prompt_template_id INTEGER"),
+        ("campaigns", "agent_pipeline_id INTEGER"),
         ("campaigns", "stop_on_reply INTEGER DEFAULT 0"),
         ("campaigns", "stop_keywords TEXT"),
         ("campaigns", "hot_keywords TEXT"),
@@ -69,11 +72,19 @@ def init_db():
         ("campaign_targets", "role TEXT"),
         ("campaign_targets", "custom_note TEXT"),
         # conversations
+        ("conversations", "project_id INTEGER"),
         ("conversations", "source_campaign_id INTEGER"),
         ("conversations", "unread_count INTEGER DEFAULT 0"),
         ("conversations", "is_hot INTEGER DEFAULT 0"),
         # contacts
+        ("contact_batches", "project_id INTEGER"),
+        ("contacts", "project_id INTEGER"),
         ("contacts", "batch_id INTEGER"),
+        # prompts, pipelines, scenario/eval traces
+        ("prompt_templates", "project_id INTEGER"),
+        ("agent_pipelines", "project_id INTEGER"),
+        ("agent_runs", "project_id INTEGER"),
+        ("scenario_cards", "project_id INTEGER"),
         # campaigns
         ("campaigns", "send_window_enabled INTEGER DEFAULT 0"),
         # settings
@@ -90,6 +101,14 @@ def init_db():
         ("proxy_pool", "last_error_message TEXT"),
         ("proxy_pool", "last_proxy_check_at TIMESTAMP"),
         ("proxy_pool", "proxy_last_rtt_ms INTEGER"),
+        # Dify knowledge sync for scenario cards
+        ("scenario_cards", "dify_document_id TEXT"),
+        ("scenario_cards", "dify_sync_status TEXT"),
+        ("scenario_cards", "dify_sync_error TEXT"),
+        ("scenario_cards", "dify_synced_at TIMESTAMP"),
+        # meeting links
+        ("scheduled_meetings", "project_id INTEGER"),
+        ("scheduled_meetings", "calendar_add_url TEXT"),
     ]
     with engine.connect() as conn:
         for table, col_def in new_cols:
@@ -156,3 +175,14 @@ def init_db():
                     conn.commit()
                 except Exception:
                     conn.rollback()
+
+    from backend.projects import assign_existing_rows_to_default_project
+
+    db = SessionLocal()
+    try:
+        assign_existing_rows_to_default_project(db)
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()

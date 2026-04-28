@@ -227,18 +227,23 @@ async def create_calendar_event(
     summary: str,
     description: str,
     calendar_id: str = "primary",
+    attendee_email: Optional[str] = None,
 ) -> dict:
     token = await get_google_access_token(db)
+    payload = {
+        "summary": summary,
+        "description": description,
+        "start": {"dateTime": start.isoformat(), "timeZone": "Europe/Moscow"},
+        "end": {"dateTime": end.isoformat(), "timeZone": "Europe/Moscow"},
+    }
+    if attendee_email:
+        payload["attendees"] = [{"email": attendee_email}]
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.post(
             f"{GOOGLE_CALENDAR_API}/calendars/{calendar_id}/events",
             headers={"Authorization": f"Bearer {token}"},
-            json={
-                "summary": summary,
-                "description": description,
-                "start": {"dateTime": start.isoformat(), "timeZone": "Europe/Moscow"},
-                "end": {"dateTime": end.isoformat(), "timeZone": "Europe/Moscow"},
-            },
+            params={"sendUpdates": "all"} if attendee_email else None,
+            json=payload,
         )
     if response.status_code >= 400:
         raise HTTPException(response.status_code, f"Google event create failed: {response.text}")

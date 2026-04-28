@@ -10,11 +10,13 @@ from sqlalchemy.orm import Session
 
 from backend.database import get_db
 from backend.models import Contact, ContactBatch
+from backend.projects import resolve_project_id
 
 router = APIRouter(prefix="/api/contacts", tags=["contacts"])
 
 
 class ContactCreate(BaseModel):
+    project_id: Optional[int] = None
     username: str
     display_name: Optional[str] = None
     company: Optional[str] = None
@@ -26,6 +28,7 @@ class ContactCreate(BaseModel):
 class ImportRequest(BaseModel):
     csv_text: str
     batch_name: str = ""
+    project_id: Optional[int] = None
 
 
 class BulkDelete(BaseModel):
@@ -35,6 +38,7 @@ class BulkDelete(BaseModel):
 def _serialize(c: Contact) -> dict:
     return {
         "id": c.id,
+        "project_id": c.project_id,
         "username": c.username,
         "display_name": c.display_name,
         "company": c.company,
@@ -49,13 +53,17 @@ def _serialize(c: Contact) -> dict:
 # ── Batch endpoints ──────────────────────────────────────────────────────────
 
 @router.get("/batches/")
-def list_batches(db: Session = Depends(get_db)):
-    batches = db.query(ContactBatch).order_by(ContactBatch.created_at.desc()).all()
+def list_batches(project_id: Optional[int] = None, db: Session = Depends(get_db)):
+    q = db.query(ContactBatch)
+    if project_id is not None:
+        q = q.filter(ContactBatch.project_id == int(project_id))
+    batches = q.order_by(ContactBatch.created_at.desc()).all()
     result = []
     for b in batches:
         count = db.query(Contact).filter(Contact.batch_id == b.id).count()
         result.append({
             "id": b.id,
+            "project_id": b.project_id,
             "name": b.name,
             "created_at": b.created_at,
             "count": count,
@@ -80,9 +88,12 @@ def delete_batch(batch_id: int, db: Session = Depends(get_db)):
 def list_contacts(
     search: Optional[str] = None,
     batch_id: Optional[int] = None,
+    project_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
     q = db.query(Contact).order_by(Contact.created_at.desc())
+    if project_id is not None:
+        q = q.filter(Contact.project_id == int(project_id))
     if batch_id is not None:
         q = q.filter(Contact.batch_id == batch_id)
     if search:
@@ -104,6 +115,7 @@ def create_contact(data: ContactCreate, db: Session = Depends(get_db)):
     if not username:
         raise HTTPException(400, "Username required")
     c = Contact(
+        project_id=resolve_project_id(db, data.project_id),
         username=username,
         display_name=data.display_name or None,
         company=data.company or None,
@@ -125,7 +137,8 @@ def import_contacts(data: ImportRequest, db: Session = Depends(get_db)):
     Format: username[,display_name[,company[,role[,custom_note[,tags]]]]]
     """
     batch_name = data.batch_name.strip() if data.batch_name.strip() else datetime.utcnow().strftime("Import %Y-%m-%d %H:%M")
-    batch = ContactBatch(name=batch_name)
+    project_id = resolve_project_id(db, data.project_id)
+    batch = ContactBatch(name=batch_name, project_id=project_id)
     db.add(batch)
     db.flush()  # get batch.id before adding contacts
 
@@ -139,6 +152,7 @@ def import_contacts(data: ImportRequest, db: Session = Depends(get_db)):
         if not username or username.startswith("#"):
             continue
         c = Contact(
+            project_id=project_id,
             username=username,
             display_name=parts[1] if len(parts) > 1 and parts[1] else None,
             company=parts[2] if len(parts) > 2 and parts[2] else None,

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -16,19 +17,44 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.database import get_db, Base
+from backend.agent_runtime import record_agent_run
+from backend.agent_policy import validate_agent_decision
+from backend.evals import run_local_eval_cases
 from backend.meeting_scheduler import (
     BOOK_MEETING_MARKER,
     append_meeting_booking_instructions,
+    book_meeting_from_agent_payload,
     book_meeting_for_conversation,
+    build_calendar_add_url,
     build_meeting_reply_text,
     extract_meeting_booking_intent,
     get_existing_scheduled_meeting,
 )
-from backend.models import Account, Campaign, CampaignTarget, Conversation, Message, PromptTemplate, ProxyPool, ScheduledMeeting, Settings
+from backend.models import Account, AgentPipeline, AgentRun, Campaign, CampaignTarget, Conversation, Message, Project, ProjectAccount, ProjectProxy, PromptTemplate, ProxyPool, ScenarioCard, ScheduledMeeting, Settings
+from backend.n8n_agent import N8nAgentCallResult, N8nAgentDecision, N8nAgentRequest, call_n8n_agent
+from backend.pipeline_runner import run_pipeline_for_auto_reply
 from backend.routers import accounts as accounts_router
+from backend.routers import bookings as bookings_router
+from backend.routers import agent_pipelines as agent_pipelines_router
+from backend.routers import agents as agents_router
 from backend.routers import campaigns as campaigns_router
 from backend.routers import conversations as conversations_router
 from backend.routers import proxy_pool as proxy_pool_router
+from backend.routers import projects as projects_router
+from backend.routers import sandbox as sandbox_router
+from backend.routers import scenarios as scenarios_router
+from backend.dify_knowledge import build_scenario_dify_document, sync_scenarios_to_dify
+from backend.scenarios import (
+    active_scenarios_for_text,
+    analyze_conversations_for_suggestions,
+    group_scenarios,
+    list_scenarios,
+    mark_founder_research_pack_legacy,
+    mine_scenario_from_conversation,
+    seed_founder_research_pack,
+    serialize_scenario,
+)
+from backend.sandbox import replay_conversation_n8n_sandbox, replay_conversation_sandbox
 from backend.google_calendar import build_calendar_event_description, build_google_auth_url, find_first_free_slot
 from backend.zoom_meetings import build_zoom_meeting_payload, zoom_host_user
 import backend.telegram_client as tg
@@ -58,6 +84,50 @@ class FakeEvent:
 
     async def get_sender(self):
         return self._sender
+
+
+class FakeTypingAction:
+    def __init__(self):
+        self.entered = False
+        self.exited = False
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, *args):
+        self.exited = True
+        return None
+
+
+class FakePresenceClient:
+    def __init__(self):
+        self.read_entities = []
+        self.typing_actions = []
+
+    async def send_read_acknowledge(self, entity):
+        self.read_entities.append(entity)
+
+    def action(self, entity, action_type):
+        action = FakeTypingAction()
+        self.typing_actions.append((entity, action_type, action))
+        return action
+
+
+class FakeManualSendClient:
+    def __init__(self):
+        self.sent = []
+        self.resolved = []
+
+    async def get_entity(self, username):
+        self.resolved.append(username)
+        return SimpleNamespace(id=6289865060, username=username)
+
+    async def send_message(self, entity, text, **kwargs):
+        self.sent.append((entity, text, kwargs))
+        if isinstance(entity, int):
+            raise ValueError("Could not find the input entity")
+        return SimpleNamespace(id=1)
 
 
 
@@ -269,6 +339,48 @@ class OutreachRuntimeTests(unittest.TestCase):
 
         self.assertEqual(campaign.status, "paused")
 
+    def test_auto_reply_delay_depends_on_task_and_message_lengths(self):
+        short = tg._auto_reply_delay_seconds(
+            inbound_text="Что это?",
+            reply_text="Коротко: это исследование.",
+            task_type="clarification",
+            jitter=0,
+        )
+        booking = tg._auto_reply_delay_seconds(
+            inbound_text="Давайте завтра в 16:00",
+            reply_text="Поставил встречу на завтра. Ссылка для добавления в календарь: https://calendar.google.com/calendar/render?action=TEMPLATE",
+            task_type="booking",
+            jitter=0,
+        )
+        long_inbound = tg._auto_reply_delay_seconds(
+            inbound_text="а" * 800,
+            reply_text="Коротко отвечаю по сути.",
+            task_type="clarification",
+            jitter=0,
+        )
+
+        self.assertGreaterEqual(short, 12)
+        self.assertLess(short, booking)
+        self.assertGreater(long_inbound, short)
+        self.assertLessEqual(booking, 90)
+
+    def test_auto_reply_presence_marks_read_and_shows_typing(self):
+        client = FakePresenceClient()
+        tg._clients[77] = client
+
+        with patch("backend.telegram_client.asyncio.sleep", AsyncMock()) as sleep:
+            read_ok = asyncio.run(tg._mark_auto_reply_read(77, "477"))
+            typing_ok = asyncio.run(tg._show_auto_reply_typing(77, "477", duration_s=3.5))
+
+        self.assertTrue(read_ok)
+        self.assertTrue(typing_ok)
+        self.assertEqual(client.read_entities, [477])
+        self.assertEqual(client.typing_actions[0][0], 477)
+        self.assertEqual(client.typing_actions[0][1], "typing")
+        self.assertTrue(client.typing_actions[0][2].entered)
+        self.assertTrue(client.typing_actions[0][2].exited)
+        sleep.assert_awaited_with(3.5)
+
     def test_google_oauth_url_uses_calendar_scopes_and_redirect(self):
         env = {
             "GOOGLE_CLIENT_ID": "client-id.apps.googleusercontent.com",
@@ -382,7 +494,62 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(meeting)
         self.assertEqual(meeting.zoom_join_url, "https://zoom.us/j/123456789")
 
-    def test_meeting_reply_text_contains_exact_slot_and_zoom_link(self):
+    def test_meeting_reply_text_prefers_calendar_event_link_over_zoom_link(self):
+        start = datetime(2026, 4, 25, 21, 15, tzinfo=ZoneInfo("Europe/Moscow"))
+        end = datetime(2026, 4, 25, 21, 45, tzinfo=ZoneInfo("Europe/Moscow"))
+
+        text = build_meeting_reply_text(
+            start,
+            end,
+            "https://zoom.us/j/123456789",
+            "https://calendar.google.com/event",
+        )
+
+        self.assertIn("25.04.2026", text)
+        self.assertIn("21:15-21:45 МСК", text)
+        self.assertIn("Ссылка на событие", text)
+        self.assertIn("https://calendar.google.com/event", text)
+        self.assertNotIn("https://zoom.us/j/123456789", text)
+
+    def test_meeting_reply_text_prefers_public_calendar_add_link(self):
+        start = datetime(2026, 4, 25, 21, 15, tzinfo=ZoneInfo("Europe/Moscow"))
+        end = datetime(2026, 4, 25, 21, 45, tzinfo=ZoneInfo("Europe/Moscow"))
+
+        text = build_meeting_reply_text(
+            start,
+            end,
+            "https://zoom.us/j/123456789",
+            "https://calendar.google.com/event/internal",
+            "https://calendar.google.com/calendar/render?action=TEMPLATE",
+        )
+
+        self.assertIn("Ссылка для добавления в календарь", text)
+        self.assertIn("https://calendar.google.com/calendar/render?action=TEMPLATE", text)
+        self.assertNotIn("https://calendar.google.com/event/internal", text)
+        self.assertNotIn("https://zoom.us/j/123456789", text)
+
+    def test_calendar_add_url_contains_event_details_and_zoom_link(self):
+        start = datetime(2026, 4, 25, 21, 15, tzinfo=ZoneInfo("Europe/Moscow"))
+        end = datetime(2026, 4, 25, 21, 45, tzinfo=ZoneInfo("Europe/Moscow"))
+
+        url = build_calendar_add_url(
+            start=start,
+            end=end,
+            title="Research interview",
+            description="Обсуждаем найм.",
+            zoom_join_url="https://zoom.us/j/123456789",
+        )
+
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        self.assertEqual(parsed.netloc, "calendar.google.com")
+        self.assertEqual(params["action"], ["TEMPLATE"])
+        self.assertEqual(params["ctz"], ["Europe/Moscow"])
+        self.assertEqual(params["dates"], ["20260425T211500/20260425T214500"])
+        self.assertIn("Research interview", params["text"][0])
+        self.assertIn("https://zoom.us/j/123456789", params["details"][0])
+
+    def test_meeting_reply_text_uses_zoom_link_when_calendar_link_is_missing(self):
         start = datetime(2026, 4, 25, 21, 15, tzinfo=ZoneInfo("Europe/Moscow"))
         end = datetime(2026, 4, 25, 21, 45, tzinfo=ZoneInfo("Europe/Moscow"))
 
@@ -430,6 +597,151 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(len(stored), 1)
         zoom.assert_awaited_once()
         calendar.assert_awaited_once()
+
+    def test_book_meeting_from_agent_payload_supports_dry_run(self):
+        with self._db() as db:
+            db.add(Account(id=46, name="Ana", phone="+573122997146", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=146, account_id=46, tg_user_id="446", tg_username="lead_user_46"))
+            db.commit()
+
+            with patch("backend.meeting_scheduler.create_zoom_meeting", AsyncMock()) as zoom:
+                with patch("backend.meeting_scheduler.create_calendar_event", AsyncMock()) as calendar:
+                    result = asyncio.run(book_meeting_from_agent_payload(
+                        db,
+                        conversation_id=146,
+                        start_at="2026-04-30T19:00:00+03:00",
+                        duration_min=30,
+                        attendee_email="person@example.com",
+                        dry_run=True,
+                    ))
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["attendee_email"], "person@example.com")
+        self.assertEqual(zoom.await_count, 0)
+        self.assertEqual(calendar.await_count, 0)
+
+    def test_book_meeting_from_agent_payload_without_email_returns_calendar_add_url(self):
+        with self._db() as db:
+            db.add(Account(id=48, name="Ana", phone="+573122997148", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=148, account_id=48, tg_user_id="448", tg_username="lead_user_48"))
+            db.commit()
+
+            with patch("backend.meeting_scheduler.get_busy_intervals", AsyncMock(return_value=[])):
+                with patch("backend.meeting_scheduler.create_zoom_meeting", AsyncMock(return_value={
+                    "id": 123456789,
+                    "join_url": "https://zoom.us/j/123456789",
+                })):
+                    with patch("backend.meeting_scheduler.zoom_configured", return_value=True):
+                        with patch("backend.meeting_scheduler.create_calendar_event", AsyncMock(return_value={
+                            "id": "google-event-no-email",
+                            "htmlLink": "https://calendar.google.com/event/internal",
+                        })) as calendar:
+                            result = asyncio.run(book_meeting_from_agent_payload(
+                                db,
+                                conversation_id=148,
+                                start_at="2026-04-30T19:00:00+03:00",
+                                duration_min=30,
+                                attendee_email="",
+                            ))
+            stored = db.query(ScheduledMeeting).filter(ScheduledMeeting.conversation_id == 148).first()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["attendee_email"], "")
+        self.assertIn("calendar.google.com/calendar/render", result["calendar_add_url"])
+        self.assertEqual(stored.calendar_add_url, result["calendar_add_url"])
+        calendar.assert_awaited_once()
+        self.assertIsNone(calendar.await_args.kwargs["attendee_email"])
+
+    def test_bookings_create_endpoint_matches_n8n_contract(self):
+        with self._db() as db:
+            db.add(Account(id=47, name="Ana", phone="+573122997147", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=147, account_id=47, tg_user_id="447", tg_username="lead_user_47"))
+            db.commit()
+
+        app = FastAPI()
+        app.include_router(bookings_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            response = client.post("/api/bookings/create", json={
+                "event_id": "test:booking",
+                "conversation_id": 147,
+                "account_id": 47,
+                "start_at": "2026-04-30T19:00:00+03:00",
+                "duration_minutes": 30,
+                "attendee_email": "person@example.com",
+                "dry_run": True,
+            })
+        finally:
+            client.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["attendee_email"], "person@example.com")
+
+    def test_generated_n8n_booking_reply_uses_calendar_event_link(self):
+        workflow_path = Path(__file__).resolve().parents[2] / "artifacts" / "n8n" / "hr_discovery_multi_agent_booking_workflow.json"
+        workflow = json.loads(workflow_path.read_text())
+        merge_node = next(node for node in workflow["nodes"] if node["name"] == "Merge Booking Result")
+        merge_code = merge_node["parameters"]["jsCode"]
+
+        self.assertIn("calendar_add_url", merge_code)
+        self.assertIn("Ссылка для добавления в календарь", merge_code)
+        self.assertNotIn("Ссылка Zoom", merge_code)
+
+    def test_generated_n8n_books_concrete_slot_without_requiring_email(self):
+        workflow_path = Path(__file__).resolve().parents[2] / "artifacts" / "n8n" / "hr_discovery_multi_agent_booking_workflow.json"
+        workflow = json.loads(workflow_path.read_text())
+        prepare_code = next(node for node in workflow["nodes"] if node["name"] == "Prepare OpenAI Request")["parameters"]["jsCode"]
+        parse_code = next(node for node in workflow["nodes"] if node["name"] == "Parse Decision")["parameters"]["jsCode"]
+
+        self.assertIn("email не обязателен", prepare_code)
+        self.assertIn("ops_action = \"create_booking\"", prepare_code)
+        self.assertNotIn("const hasEmail", parse_code)
+        self.assertNotIn("booking_missing_required_fields", parse_code)
+
+    def test_generated_n8n_prompt_has_short_incremental_reply_rules(self):
+        workflow_path = Path(__file__).resolve().parents[2] / "artifacts" / "n8n" / "hr_discovery_multi_agent_booking_workflow.json"
+        workflow = json.loads(workflow_path.read_text())
+        prepare_code = next(node for node in workflow["nodes"] if node["name"] == "Prepare OpenAI Request")["parameters"]["jsCode"]
+
+        self.assertIn("Не повторяй уже сказанные мысли", prepare_code)
+        self.assertIn("Если ответ повторяет предыдущий", prepare_code)
+        self.assertIn("Вы имеете в виду", prepare_code)
+        self.assertIn("last_messages", prepare_code)
+        self.assertIn("scenario_cards", prepare_code)
+
+    def test_generated_n8n_prompt_uses_dify_knowledge_cards(self):
+        workflow_path = Path(__file__).resolve().parents[2] / "artifacts" / "n8n" / "hr_discovery_multi_agent_booking_workflow.json"
+        workflow = json.loads(workflow_path.read_text())
+        prepare_code = next(node for node in workflow["nodes"] if node["name"] == "Prepare OpenAI Request")["parameters"]["jsCode"]
+
+        self.assertIn("knowledge_cards", prepare_code)
+        self.assertIn("knowledgeCards", prepare_code)
+        self.assertIn("Knowledge cards", prepare_code)
+        self.assertIn("knowledge_cards важнее", prepare_code)
+
+    def test_generated_n8n_prompt_includes_humanizer_rules(self):
+        workflow_path = Path(__file__).resolve().parents[2] / "artifacts" / "n8n" / "hr_discovery_multi_agent_booking_workflow.json"
+        workflow = json.loads(workflow_path.read_text())
+        prepare_code = next(node for node in workflow["nodes"] if node["name"] == "Prepare OpenAI Request")["parameters"]["jsCode"]
+
+        self.assertIn("Humanizer pass", prepare_code)
+        self.assertIn("не звучит как AI", prepare_code)
+        self.assertIn("не используй стерильную эмпатию", prepare_code)
+        self.assertIn("не делай ответ идеально отполированным", prepare_code)
+        self.assertIn("внутреннюю проверку не выводи", prepare_code)
 
     def test_schedule_conversation_meeting_endpoint_returns_reply_text(self):
         with self._db() as db:
@@ -556,6 +868,1054 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertIn("Отлично, договорились.", sent_text)
         self.assertIn("вернусь со ссылкой", sent_text)
         self.assertNotIn(BOOK_MEETING_MARKER, sent_text)
+
+    def test_record_agent_run_persists_redacted_json(self):
+        with self._db() as db:
+            run = record_agent_run(
+                db,
+                conversation_id=501,
+                run_type="reply",
+                model="gpt-5.4-mini",
+                input_payload={"openai_key": "sk-secret", "messages": ["hello"]},
+                output_payload={"action": "send_reply"},
+            )
+            stored = db.query(AgentRun).filter(AgentRun.id == run.id).first()
+
+        self.assertEqual(stored.status, "succeeded")
+        self.assertEqual(stored.run_type, "reply")
+        self.assertNotIn("sk-secret", stored.input_json)
+        self.assertEqual(json.loads(stored.output_json)["action"], "send_reply")
+
+    def test_scenario_mining_creates_draft_scenario_from_conversation(self):
+        with self._db() as db:
+            db.add(Account(id=31, name="Ana", phone="+573122997131", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=131, account_id=31, tg_user_id="431", tg_first_name="Lead"))
+            db.add(Message(conversation_id=131, role="user", text="Это продажа? Мне не интересно покупать."))
+            db.add(Message(conversation_id=131, role="assistant", text="Нет, это короткое исследовательское интервью."))
+            db.commit()
+
+            scenario = mine_scenario_from_conversation(db, 131)
+
+            stored = db.query(ScenarioCard).filter(ScenarioCard.id == scenario.id).first()
+
+        self.assertEqual(stored.status, "draft")
+        self.assertEqual(stored.intent, "sales_objection")
+        self.assertIn("продаж", stored.trigger_summary.lower())
+
+    def test_founder_research_pack_seeds_active_grouped_scenarios_idempotently(self):
+        with self._db() as db:
+            first = seed_founder_research_pack(db)
+            second = seed_founder_research_pack(db)
+            cards = db.query(ScenarioCard).filter(ScenarioCard.tags.like("%pack:founder_research%")).all()
+            grouped = group_scenarios(cards)
+
+        labels = {group["label"] for group in grouped}
+        combined_reply_text = "\n".join(card.recommended_reply for card in cards).lower()
+
+        self.assertGreaterEqual(first["created"], 20)
+        self.assertEqual(second["created"], 0)
+        self.assertEqual(first["total"], len(cards))
+        self.assertTrue(all(card.status == "active" for card in cards))
+        self.assertIn("Вопросы и ответы", labels)
+        self.assertIn("Назначение встречи", labels)
+        self.assertIn("Ограничения", labels)
+        self.assertIn("это не продажа", combined_reply_text)
+
+    def test_active_scenarios_match_founder_research_faq_question(self):
+        with self._db() as db:
+            seed_founder_research_pack(db)
+
+            matches = active_scenarios_for_text(db, "Это продажа? Что вы продаете?", limit=1)
+
+        self.assertEqual(matches[0].intent, "sales_objection")
+        self.assertIn("не продажа", matches[0].recommended_reply.lower())
+        self.assertIn("Это продажа?", serialize_scenario(matches[0])["example_questions"])
+
+    def test_scenario_pack_endpoint_returns_grouped_cards(self):
+        app = FastAPI()
+        app.include_router(scenarios_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            seed_response = client.post("/api/scenarios/seed-founder-research-pack")
+            grouped_response = client.get("/api/scenarios/grouped?status=active")
+        finally:
+            client.close()
+
+        self.assertEqual(seed_response.status_code, 200)
+        self.assertGreaterEqual(seed_response.json()["created"], 20)
+        self.assertEqual(grouped_response.status_code, 200)
+        self.assertTrue(any(group["label"] == "Вопросы и ответы" for group in grouped_response.json()))
+
+    def test_analyze_conversations_creates_idempotent_suggested_scenarios(self):
+        with self._db() as db:
+            db.add(Account(id=35, name="Ana", phone="+573122997135", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=135, account_id=35, tg_user_id="435", tg_first_name="Lead"))
+            db.add(Message(conversation_id=135, role="user", text="А это продажа? Я ничего покупать не планирую."))
+            db.add(Message(conversation_id=135, role="assistant", text="Нет, это исследовательский разговор."))
+            db.commit()
+
+            first = analyze_conversations_for_suggestions(db)
+            second = analyze_conversations_for_suggestions(db)
+            suggestions = db.query(ScenarioCard).filter(ScenarioCard.status == "suggested").all()
+
+        self.assertEqual(first["created"], 1)
+        self.assertEqual(second["created"], 0)
+        self.assertEqual(len(suggestions), 1)
+        self.assertEqual(suggestions[0].intent, "sales_objection")
+        self.assertEqual(suggestions[0].source_conversation_id, 135)
+        self.assertIn("auto:conversation_analysis", suggestions[0].tags)
+
+    def test_analyze_conversations_endpoint_returns_improve_queue_items(self):
+        with self._db() as db:
+            db.add(Account(id=36, name="Ana", phone="+573122997136", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=136, account_id=36, tg_user_id="436", tg_first_name="Lead"))
+            db.add(Message(conversation_id=136, role="user", text="Давайте созвонимся на неделе."))
+            db.commit()
+
+        app = FastAPI()
+        app.include_router(scenarios_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            response = client.post("/api/scenarios/analyze-conversations")
+        finally:
+            client.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["created"], 1)
+        self.assertEqual(payload["suggestions"][0]["status"], "suggested")
+        self.assertEqual(payload["suggestions"][0]["source_conversation_id"], 136)
+
+    def test_build_scenario_dify_document_keeps_scenario_structure(self):
+        card = ScenarioCard(
+            id=137,
+            title="Это не продажа",
+            intent="sales_objection",
+            trigger_summary="Собеседник спрашивает, не продажа ли это.",
+            recommended_reply="Нет, это исследовательский разговор.",
+            avoid_reply="Не спорить.",
+            status="active",
+            tags="group:faq,key:sales_objection,not_sales",
+        )
+
+        document = build_scenario_dify_document(card)
+
+        self.assertEqual(document["name"], "scenario-137-eto-ne-prodazha.md")
+        self.assertIn("# Это не продажа", document["text"])
+        self.assertIn("intent: sales_objection", document["text"])
+        self.assertIn("Собеседник спрашивает, не продажа ли это.", document["text"])
+        self.assertIn("Нет, это исследовательский разговор.", document["text"])
+        self.assertIn("Не спорить.", document["text"])
+
+    def test_list_scenarios_excludes_legacy_by_default(self):
+        with self._db() as db:
+            db.add(
+                ScenarioCard(
+                    title="Новый сценарий",
+                    intent="context_question",
+                    trigger_summary="Рабочий сценарий.",
+                    recommended_reply="Ответ.",
+                    status="active",
+                )
+            )
+            db.add(
+                ScenarioCard(
+                    title="Старый сценарий",
+                    intent="legacy",
+                    trigger_summary="Старый сценарий.",
+                    recommended_reply="Старый ответ.",
+                    status="legacy",
+                )
+            )
+            db.commit()
+
+            default_response = [card.title for card in list_scenarios(db)]
+            legacy_response = [card.title for card in list_scenarios(db, status="legacy")]
+
+        self.assertIn("Новый сценарий", default_response)
+        self.assertNotIn("Старый сценарий", default_response)
+        self.assertEqual(legacy_response, ["Старый сценарий"])
+
+    def test_mark_founder_research_pack_legacy_removes_seeded_cards_from_active_set(self):
+        with self._db() as db:
+            seed_founder_research_pack(db)
+
+            result = mark_founder_research_pack_legacy(db)
+            active_pack_cards = (
+                db.query(ScenarioCard)
+                .filter(
+                    ScenarioCard.status == "active",
+                    ScenarioCard.tags.like("%pack:founder_research%"),
+                )
+                .count()
+            )
+            legacy_pack_cards = db.query(ScenarioCard).filter(ScenarioCard.status == "legacy").count()
+
+        self.assertGreaterEqual(result["updated"], 20)
+        self.assertEqual(active_pack_cards, 0)
+        self.assertGreaterEqual(legacy_pack_cards, 20)
+
+    def test_mark_founder_research_pack_legacy_endpoint(self):
+        app = FastAPI()
+        app.include_router(scenarios_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            client.post("/api/scenarios/seed-founder-research-pack")
+            response = client.post("/api/scenarios/legacy/founder-research-pack")
+            grouped_response = client.get("/api/scenarios/grouped")
+        finally:
+            client.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreaterEqual(response.json()["updated"], 20)
+        self.assertFalse(any(group["key"] == "faq" for group in grouped_response.json()))
+
+    def test_sync_scenarios_to_dify_creates_and_updates_documents(self):
+        class FakeDifyClient:
+            def __init__(self):
+                self.created = []
+                self.updated = []
+
+            def create_document_by_text(self, *, name, text):
+                self.created.append({"name": name, "text": text})
+                return {"document": {"id": "doc-created"}, "batch": "batch-created"}
+
+            def update_document_by_text(self, *, document_id, name, text):
+                self.updated.append({"document_id": document_id, "name": name, "text": text})
+                return {"document": {"id": document_id}, "batch": "batch-updated"}
+
+        with self._db() as db:
+            db.add(
+                ScenarioCard(
+                    id=138,
+                    title="Новый сценарий",
+                    intent="context_question",
+                    trigger_summary="Спрашивают контекст.",
+                    recommended_reply="Коротко объяснить контекст.",
+                    status="active",
+                )
+            )
+            db.add(
+                ScenarioCard(
+                    id=139,
+                    title="Существующий сценарий",
+                    intent="book_meeting",
+                    trigger_summary="Готовы к встрече.",
+                    recommended_reply="Подтвердить слот.",
+                    status="active",
+                    dify_document_id="doc-existing",
+                )
+            )
+            db.add(
+                ScenarioCard(
+                    id=140,
+                    title="Черновик",
+                    intent="draft",
+                    trigger_summary="Не должен синкаться.",
+                    recommended_reply="Не синкать.",
+                    status="draft",
+                )
+            )
+            db.commit()
+
+            fake_client = FakeDifyClient()
+            result = sync_scenarios_to_dify(db, client=fake_client, status="active")
+            created_card = db.query(ScenarioCard).filter(ScenarioCard.id == 138).first()
+            updated_card = db.query(ScenarioCard).filter(ScenarioCard.id == 139).first()
+
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(len(fake_client.created), 1)
+        self.assertEqual(fake_client.updated[0]["document_id"], "doc-existing")
+        self.assertEqual(created_card.dify_document_id, "doc-created")
+        self.assertEqual(created_card.dify_sync_status, "synced")
+        self.assertEqual(updated_card.dify_sync_status, "synced")
+
+    def test_dify_sync_endpoint_returns_sync_result(self):
+        app = FastAPI()
+        app.include_router(scenarios_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            with patch(
+                "backend.routers.scenarios.sync_scenarios_to_dify",
+                return_value={"status": "active", "total": 1, "created": 1, "updated": 0, "failed": 0, "items": []},
+            ):
+                response = client.post("/api/scenarios/dify/sync?status=active")
+        finally:
+            client.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["created"], 1)
+
+    def test_sandbox_replay_is_dry_run_and_uses_active_scenarios(self):
+        with self._db() as db:
+            db.add(Account(id=32, name="Ana", phone="+573122997132", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=132, account_id=32, tg_user_id="432", tg_first_name="Lead"))
+            db.add(Message(conversation_id=132, role="user", text="Да, давайте созвонимся завтра."))
+            db.add(
+                ScenarioCard(
+                    title="Lead agrees to call",
+                    intent="book_meeting",
+                    trigger_summary="Lead agrees to a call",
+                    recommended_reply="Confirm and book a meeting.",
+                    status="active",
+                    tags="booking,call",
+                )
+            )
+            db.commit()
+
+            result = replay_conversation_sandbox(db, conversation_id=132, dry_run_tools=True)
+            runs = db.query(AgentRun).filter(AgentRun.conversation_id == 132).all()
+            meetings = db.query(ScheduledMeeting).filter(ScheduledMeeting.conversation_id == 132).all()
+
+        self.assertEqual(result["reply"]["action"], "book_meeting")
+        self.assertTrue(result["would_book_meeting"])
+        self.assertEqual(result["tool_result_preview"]["mode"], "dry_run")
+        self.assertGreaterEqual(len(result["selected_scenarios"]), 1)
+        self.assertEqual(len(meetings), 0)
+        self.assertTrue(any(run.run_type == "sandbox" for run in runs))
+
+    def test_sandbox_replay_uses_selected_founder_pack_faq_reply(self):
+        with self._db() as db:
+            seed_founder_research_pack(db)
+            db.add(Account(id=34, name="Ana", phone="+573122997134", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=134, account_id=34, tg_user_id="434", tg_first_name="Lead"))
+            db.add(Message(conversation_id=134, role="user", text="Это продажа? Я ничего покупать не хочу."))
+            db.commit()
+
+            result = replay_conversation_sandbox(db, conversation_id=134, dry_run_tools=True)
+
+        self.assertEqual(result["selected_scenarios"][0]["intent"], "sales_objection")
+        self.assertIn("не продажа", result["reply"]["reply_text"].lower())
+
+    def test_eval_runner_returns_scorecard_for_agent_cases(self):
+        cases = [
+            {
+                "id": "booking_case",
+                "history": [{"role": "user", "text": "Ок, давайте созвонимся"}],
+                "expected_action": "book_meeting",
+                "must_not_include": ["[[BOOK_MEETING]]"],
+            },
+            {
+                "id": "question_case",
+                "history": [{"role": "user", "text": "А что вы исследуете?"}],
+                "expected_action": "send_reply",
+                "must_include": ["исслед"],
+            },
+        ]
+
+        result = run_local_eval_cases(cases)
+
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["score"], 1.0)
+
+    def test_agent_debug_endpoint_replays_conversation(self):
+        with self._db() as db:
+            db.add(Account(id=33, name="Ana", phone="+573122997133", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=133, account_id=33, tg_user_id="433", tg_first_name="Lead"))
+            db.add(Message(conversation_id=133, role="user", text="Сколько длится интервью?"))
+            db.commit()
+
+        app = FastAPI()
+        app.include_router(agents_router.router)
+        app.include_router(sandbox_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        client = TestClient(app)
+        try:
+            response = client.post("/api/sandbox/replay", json={"conversation_id": 133, "dry_run_tools": True})
+            runs_response = client.get("/api/agents/runs?conversation_id=133")
+        finally:
+            client.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["reply"]["action"], "send_reply")
+        self.assertEqual(runs_response.status_code, 200)
+        self.assertGreaterEqual(len(runs_response.json()), 1)
+
+    def test_n8n_sandbox_replay_records_decision_without_sending(self):
+        with self._db() as db:
+            db.add(Account(id=37, name="Ana", phone="+573122997137", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=137, account_id=37, tg_user_id="437", tg_first_name="Lead"))
+            db.add(Message(conversation_id=137, role="user", text="Ок, давайте созвонимся."))
+            db.commit()
+
+            decision = N8nAgentDecision(
+                approved=True,
+                stage="scheduling",
+                intent="availability_offer",
+                reply_text="Да, давайте подберем удобное время.",
+                ops_action="none",
+                reason="Lead is open to a call.",
+            )
+            with patch(
+                "backend.sandbox.call_n8n_agent",
+                AsyncMock(return_value=N8nAgentCallResult(ok=True, decision=decision, raw_response=decision.model_dump(mode="json"))),
+            ) as call:
+                result = asyncio.run(replay_conversation_n8n_sandbox(db, conversation_id=137))
+            runs = db.query(AgentRun).filter(AgentRun.conversation_id == 137).all()
+
+        self.assertEqual(call.await_count, 1)
+        self.assertEqual(result["engine"], "n8n")
+        self.assertFalse(result["would_send"])
+        self.assertTrue(result["policy"]["safe_to_send"])
+        self.assertEqual(result["decision"]["reply_text"], "Да, давайте подберем удобное время.")
+        self.assertTrue(any(run.run_type == "sandbox_n8n" for run in runs))
+
+    def test_n8n_sandbox_replay_includes_dify_knowledge_cards(self):
+        with self._db() as db:
+            db.add(Account(id=57, name="Ana", phone="+573122997157", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=157, account_id=57, tg_user_id="457", tg_first_name="Lead"))
+            db.add(Message(conversation_id=157, role="user", text="А что я получу за интервью?"))
+            db.commit()
+
+            decision = N8nAgentDecision(
+                approved=True,
+                stage="qualification",
+                intent="other",
+                reply_text="Личная польза — краткий итог исследования после серии интервью.",
+                ops_action="none",
+            )
+            dify_result = {
+                "query": "Последнее сообщение пользователя:\nА что я получу за интервью?",
+                "cards": [{"source": "dify", "title": "value-question.md", "score": 0.8, "content": "Не повторять питч."}],
+                "error": None,
+                "configured": True,
+            }
+            with patch("backend.sandbox.retrieve_dify_knowledge_cards", AsyncMock(return_value=dify_result)):
+                with patch(
+                    "backend.sandbox.call_n8n_agent",
+                    AsyncMock(return_value=N8nAgentCallResult(ok=True, decision=decision, raw_response=decision.model_dump(mode="json"))),
+                ) as call:
+                    result = asyncio.run(replay_conversation_n8n_sandbox(db, conversation_id=157))
+
+        request = call.await_args.args[0]
+        self.assertTrue(result["policy"]["safe_to_send"])
+        self.assertEqual(request.knowledge_cards[0]["title"], "value-question.md")
+
+    def test_n8n_sandbox_blocks_fake_booking_claim(self):
+        with self._db() as db:
+            db.add(Account(id=38, name="Ana", phone="+573122997138", app_id="2040", app_hash="hash"))
+            db.add(Conversation(id=138, account_id=38, tg_user_id="438", tg_first_name="Lead"))
+            db.add(Message(conversation_id=138, role="user", text="Да, подходит."))
+            db.commit()
+
+            decision = N8nAgentDecision(
+                approved=True,
+                stage="scheduling",
+                intent="availability_offer",
+                reply_text="Инвайт отправил, ссылка Zoom: https://zoom.us/j/123",
+                ops_action="none",
+            )
+            with patch(
+                "backend.sandbox.call_n8n_agent",
+                AsyncMock(return_value=N8nAgentCallResult(ok=True, decision=decision, raw_response=decision.model_dump(mode="json"))),
+            ):
+                result = asyncio.run(replay_conversation_n8n_sandbox(db, conversation_id=138))
+            stored = db.query(AgentRun).filter(AgentRun.conversation_id == 138).first()
+
+        self.assertFalse(result["policy"]["safe_to_send"])
+        self.assertIn("booking_claim_without_record", result["policy"]["issues"])
+        self.assertEqual(stored.status, "blocked")
+
+    def test_agent_policy_blocks_repetitive_long_cta_reply(self):
+        decision = {
+            "approved": True,
+            "intent": "other",
+            "reply_text": (
+                "Понимаю вопрос — если коротко, прямой пользы в виде сервиса тут пока нет: "
+                "это исследовательский разговор, а в ответ могу потом прислать краткое резюме "
+                "по повторяющимся паттернам и боли, которые увидим по найму. Если вам это не очень "
+                "интересно, тоже ок; если интересно, можем просто выбрать удобные 20–30 минут."
+            ),
+            "ops_action": "none",
+        }
+        recent_messages = [
+            {"role": "assistant", "text": "Ничего обязательного — только короткий разговор про ваш опыт найма, а вам в ответ пришлю краткий итог по типовым проблемам и паттернам."},
+            {"role": "user", "text": "Я имею ввиду что я за это получу"},
+        ]
+
+        policy = validate_agent_decision(decision, recent_messages=recent_messages)
+
+        self.assertFalse(policy["safe_to_send"])
+        self.assertIn("reply_too_long_for_intent", policy["issues"])
+        self.assertIn("repeated_meeting_cta", policy["issues"])
+
+    def test_agent_policy_allows_short_incremental_value_reply(self):
+        decision = {
+            "approved": True,
+            "intent": "other",
+            "reply_text": "Понял. Личная выгода — краткий итог исследования после серии интервью. Если это не ценно, не буду отвлекать.",
+            "ops_action": "none",
+        }
+        recent_messages = [
+            {"role": "assistant", "text": "Могу потом прислать краткое резюме по повторяющимся паттернам."},
+            {"role": "user", "text": "Я имею ввиду что я за это получу"},
+        ]
+
+        policy = validate_agent_decision(decision, recent_messages=recent_messages)
+
+        self.assertTrue(policy["safe_to_send"])
+        self.assertEqual(policy["final_reply_text"], decision["reply_text"])
+
+    def test_agent_policy_allows_booking_confirmation_with_long_calendar_link(self):
+        calendar_url = "https://calendar.google.com/calendar/render?action=TEMPLATE&text=" + ("a" * 900)
+        decision = {
+            "approved": True,
+            "intent": "availability_offer",
+            "reply_text": f"Поставил встречу на 28.04.2026, 19:00-19:30 МСК. Ссылка для добавления в календарь: {calendar_url}",
+            "ops_action": "create_booking",
+            "booking": {
+                "start_at": "2026-04-28T19:00:00+03:00",
+                "calendar_add_url": calendar_url,
+            },
+        }
+
+        policy = validate_agent_decision(decision, booking_record_exists=True, recent_messages=[
+            {"role": "user", "text": "Давай завтра на 7"},
+        ])
+
+        self.assertTrue(policy["safe_to_send"])
+        self.assertEqual(policy["issues"], [])
+
+    def test_telegram_outgoing_text_renders_urls_as_clickable_label(self):
+        calendar_url = "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Interview&dates=20260428"
+        send_text, persisted_text, kwargs = tg._prepare_telegram_outgoing_text(
+            f"Поставил встречу. Добавьте событие в календарь: {calendar_url}"
+        )
+
+        self.assertEqual(kwargs, {"parse_mode": "html"})
+        self.assertNotIn(calendar_url, persisted_text)
+        self.assertEqual(persisted_text, "Поставил встречу. Добавьте событие в календарь: ссылка")
+        self.assertIn('href="https://calendar.google.com/calendar/render?action=TEMPLATE&amp;text=Interview&amp;dates=20260428"', send_text)
+        self.assertIn(">ссылка</a>", send_text)
+
+    def test_n8n_adapter_rejects_invalid_decision_schema(self):
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"approved": True, "stage": "not_a_stage"}
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def post(self, *args, **kwargs):
+                return FakeResponse()
+
+        request = N8nAgentRequest(
+            event_id="test:invalid",
+            mode="sandbox",
+            conversation={"id": 1},
+            messages=[],
+        )
+        with patch("backend.n8n_agent.httpx.AsyncClient", FakeClient):
+            result = asyncio.run(call_n8n_agent(request, webhook_url="https://example.test/webhook"))
+
+        self.assertFalse(result.ok)
+        self.assertIn("Invalid n8n decision schema", result.error)
+
+    def test_agent_pipeline_crud_and_campaign_assignment(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+        app.include_router(campaigns_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(Account(id=39, name="Ana", phone="+573122997139", app_id="2040", app_hash="hash"))
+            db.commit()
+
+        client = TestClient(app)
+        try:
+            pipeline_response = client.post("/api/agent-pipelines/", json={
+                "name": "n8n HR agent",
+                "type": "n8n_webhook",
+                "status": "active",
+                "config": {"mode": "live", "webhook_url": "https://n8n.test/webhook", "shared_secret": "secret"},
+            })
+            pipeline_id = pipeline_response.json()["id"]
+            campaign_response = client.post("/api/campaigns/", json={
+                "name": "Pipeline campaign",
+                "account_ids": [39],
+                "messages": ["hi"],
+                "targets": ["lead_user"],
+                "agent_pipeline_id": pipeline_id,
+            })
+            campaigns_response = client.get("/api/campaigns/")
+        finally:
+            client.close()
+
+        self.assertEqual(pipeline_response.status_code, 200)
+        self.assertEqual(pipeline_response.json()["config"]["shared_secret"], "")
+        self.assertTrue(pipeline_response.json()["config"]["shared_secret_configured"])
+        self.assertEqual(campaign_response.status_code, 200)
+        self.assertEqual(campaigns_response.json()[0]["agent_pipeline_id"], pipeline_id)
+        self.assertEqual(campaigns_response.json()[0]["agent_pipeline_name"], "n8n HR agent")
+
+    def test_campaigns_are_scoped_by_project(self):
+        app = FastAPI()
+        app.include_router(projects_router.router)
+        app.include_router(campaigns_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(Account(id=401, name="Ana", phone="+573122997401", app_id="2040", app_hash="hash"))
+            db.add(Project(id=10, name="HR Discovery", status="active"))
+            db.add(Project(id=11, name="Founder Research", status="active"))
+            db.commit()
+
+        client = TestClient(app)
+        try:
+            response_a = client.post("/api/campaigns/", json={
+                "name": "Project A campaign",
+                "project_id": 10,
+                "account_ids": [401],
+                "messages": ["hi"],
+                "targets": ["lead_a"],
+            })
+            response_b = client.post("/api/campaigns/", json={
+                "name": "Project B campaign",
+                "project_id": 11,
+                "account_ids": [401],
+                "messages": ["hi"],
+                "targets": ["lead_b"],
+            })
+            campaigns_a = client.get("/api/campaigns/?project_id=10")
+            campaigns_b = client.get("/api/campaigns/?project_id=11")
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response_a.status_code, 200)
+        self.assertEqual(response_b.status_code, 200)
+        self.assertEqual([c["name"] for c in campaigns_a.json()], ["Project A campaign"])
+        self.assertEqual([c["name"] for c in campaigns_b.json()], ["Project B campaign"])
+        self.assertEqual(campaigns_a.json()[0]["project_id"], 10)
+
+    def test_project_can_link_global_account_and_proxy(self):
+        app = FastAPI()
+        app.include_router(projects_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(Project(id=20, name="HR Discovery", status="active"))
+            db.add(Account(id=402, name="Shared account", phone="+573122997402", app_id="2040", app_hash="hash"))
+            db.add(ProxyPool(id=30, label="Shared proxy", host="127.0.0.1", port=1080, proxy_type="SOCKS5"))
+            db.commit()
+
+        client = TestClient(app)
+        try:
+            account_link = client.post("/api/projects/20/accounts/402/attach")
+            proxy_link = client.post("/api/projects/20/proxies/30/attach")
+            resources = client.get("/api/projects/20/resources")
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(account_link.status_code, 200)
+        self.assertEqual(proxy_link.status_code, 200)
+        self.assertEqual(resources.json()["accounts"][0]["id"], 402)
+        self.assertEqual(resources.json()["proxies"][0]["id"], 30)
+        with self._db() as db:
+            self.assertEqual(db.query(ProjectAccount).count(), 1)
+            self.assertEqual(db.query(ProjectProxy).count(), 1)
+
+    def test_bind_n8n_workflow_updates_pipeline_config(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(AgentPipeline(id=44, name="Bindable", type="n8n_webhook", status="active", config_json="{}"))
+            db.commit()
+
+        workflow = {
+            "id": "wf_1",
+            "name": "Auto reply workflow",
+            "nodes": [
+                {
+                    "id": "hook",
+                    "type": "n8n-nodes-base.webhook",
+                    "parameters": {"path": "auto-reply-orchestrator"},
+                }
+            ],
+        }
+        client = TestClient(app)
+        try:
+            response = client.post("/api/agent-pipelines/44/bind-n8n-workflow", json={
+                "base_url": "http://localhost:5678",
+                "api_key": "test-key",
+                "workflow_id": "wf_1",
+                "workflow": workflow,
+                "mode": "live",
+                "shared_secret": "secret",
+            })
+        finally:
+            client.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["config"]["workflow_id"], "wf_1")
+        self.assertEqual(payload["config"]["workflow_name"], "Auto reply workflow")
+        self.assertEqual(payload["config"]["webhook_url"], "http://localhost:5678/webhook/auto-reply-orchestrator")
+        self.assertEqual(payload["config"]["workflow_editor_url"], "http://localhost:5678/workflow/wf_1")
+        self.assertEqual(payload["config"]["shared_secret"], "")
+        self.assertTrue(payload["config"]["shared_secret_configured"])
+
+    def test_auto_reply_uses_active_agent_pipeline_instead_of_legacy_prompt(self):
+        with self._db() as db:
+            db.add(Settings(id=1, provider="openai", openai_key="", model="gpt-4o-mini", auto_reply_enabled=True, context_messages=10))
+            db.add(Account(id=40, name="Ana", phone="+573122997140", app_id="2040", app_hash="hash", auto_reply=True))
+            db.add(
+                AgentPipeline(
+                    id=41,
+                    name="Live pipeline",
+                    type="n8n_webhook",
+                    status="active",
+                    config_json=json.dumps({"mode": "live", "webhook_url": "https://n8n.test/webhook"}),
+                )
+            )
+            db.add(
+                Campaign(
+                    id=42,
+                    name="Pipeline campaign",
+                    account_id=40,
+                    account_ids="[40]",
+                    messages='["hi"]',
+                    status="running",
+                    agent_pipeline_id=41,
+                )
+            )
+            db.add(Conversation(id=143, account_id=40, tg_user_id="443", tg_first_name="Lead", source_campaign_id=42))
+            db.add(Message(id=144, conversation_id=143, role="user", text="Да, интересно."))
+            db.commit()
+
+        decision = N8nAgentDecision(
+            approved=True,
+            stage="qualification",
+            intent="other",
+            reply_text="Отлично, расскажу коротко и предложу пару слотов.",
+            ops_action="none",
+        )
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch("backend.telegram_client.asyncio.sleep", AsyncMock()):
+                with patch("backend.pipeline_runner.call_n8n_agent", AsyncMock(return_value=N8nAgentCallResult(ok=True, decision=decision, raw_response=decision.model_dump(mode="json")))):
+                    with patch("backend.gpt_handler.generate_reply", AsyncMock(return_value="legacy reply")) as generate:
+                        with patch("backend.telegram_client.send_manual_message", AsyncMock(return_value={"ok": True})) as send:
+                            asyncio.run(
+                                tg._run_scheduled_auto_reply(
+                                    account_id=40,
+                                    conversation_id=143,
+                                    tg_user_id="443",
+                                    trigger_message_id=144,
+                                    delay_s=0.0,
+                                    scheduled_at=tg._utcnow(),
+                                )
+                            )
+
+        self.assertEqual(generate.await_count, 0)
+        self.assertEqual(send.await_count, 1)
+        self.assertEqual(send.await_args.args[3], "Отлично, расскажу коротко и предложу пару слотов.")
+
+    def test_agent_pipeline_uses_production_webhook_url_from_imported_config(self):
+        with self._db() as db:
+            pipeline = AgentPipeline(
+                id=145,
+                name="Imported n8n pipeline",
+                type="n8n_webhook",
+                status="active",
+                config_json=json.dumps({
+                    "mode": "live",
+                    "production_webhook_url": "https://n8n.test/webhook/imported",
+                }),
+            )
+            conversation = Conversation(id=146, account_id=40, tg_user_id="446", tg_first_name="Lead")
+            message = Message(id=147, conversation_id=146, role="user", text="Да, интересно.")
+            db.add_all([pipeline, conversation, message])
+            db.commit()
+
+            decision = N8nAgentDecision(
+                approved=True,
+                stage="qualification",
+                intent="other",
+                reply_text="Отлично, договоримся о времени.",
+                ops_action="none",
+            )
+            with patch("backend.pipeline_runner.call_n8n_agent", AsyncMock(return_value=N8nAgentCallResult(ok=True, decision=decision, raw_response=decision.model_dump(mode="json")))) as call:
+                result = asyncio.run(
+                    run_pipeline_for_auto_reply(
+                        db,
+                        pipeline=pipeline,
+                        conversation=conversation,
+                        messages=[message],
+                        trigger_message_id=147,
+                    )
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(call.await_args.kwargs["webhook_url"], "https://n8n.test/webhook/imported")
+
+    def test_agent_pipeline_payload_includes_active_scenario_cards(self):
+        with self._db() as db:
+            pipeline = AgentPipeline(
+                id=149,
+                name="Scenario-aware n8n pipeline",
+                type="n8n_webhook",
+                status="active",
+                config_json=json.dumps({"mode": "live", "webhook_url": "https://n8n.test/webhook"}),
+            )
+            conversation = Conversation(id=150, account_id=40, tg_user_id="450", tg_first_name="Lead")
+            message = Message(id=151, conversation_id=150, role="user", text="А что мне будет?")
+            db.add_all([pipeline, conversation, message])
+            db.add(
+                ScenarioCard(
+                    title="Личная польза от интервью",
+                    intent="value_question",
+                    trigger_summary="Спрашивают, что собеседник получит за участие.",
+                    recommended_reply="Коротко назвать личную пользу без повторного питча.",
+                    avoid_reply="Не повторять длинное описание исследования.",
+                    status="active",
+                    tags="value,benefit,получит",
+                )
+            )
+            db.commit()
+
+            decision = N8nAgentDecision(
+                approved=True,
+                stage="qualification",
+                intent="other",
+                reply_text="Коротко: пришлю итог по паттернам после интервью.",
+                ops_action="none",
+            )
+            with patch("backend.pipeline_runner.call_n8n_agent", AsyncMock(return_value=N8nAgentCallResult(ok=True, decision=decision, raw_response=decision.model_dump(mode="json")))) as call:
+                result = asyncio.run(
+                    run_pipeline_for_auto_reply(
+                        db,
+                        pipeline=pipeline,
+                        conversation=conversation,
+                        messages=[message],
+                        trigger_message_id=151,
+                    )
+                )
+
+        self.assertTrue(result["ok"])
+        request = call.await_args.args[0]
+        self.assertEqual(request.scenario_cards[0]["intent"], "value_question")
+        self.assertIn("Коротко назвать", request.scenario_cards[0]["recommended_reply"])
+
+    def test_dify_retriever_normalizes_retrieve_records(self):
+        from backend.dify_retriever import DifyRetrievalConfig, retrieve_dify_knowledge_cards
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "records": [
+                        {
+                            "score": 0.78,
+                            "segment": {
+                                "id": "seg-1",
+                                "content": "## Как отвечать\nКоротко объяснить личную пользу.",
+                                "document": {"id": "doc-1", "name": "value-question.md"},
+                            },
+                        }
+                    ]
+                }
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def post(self, url, headers=None, json=None):
+                self.url = url
+                self.headers = headers
+                self.payload = json
+                return FakeResponse()
+
+        config = DifyRetrievalConfig(
+            api_base_url="https://dify.test/v1",
+            api_key="dataset-key",
+            dataset_id="dataset-1",
+            timeout_s=3,
+        )
+        with patch("backend.dify_retriever.httpx.AsyncClient", FakeClient):
+            result = asyncio.run(retrieve_dify_knowledge_cards("А что мне будет?", config=config, top_k=3))
+
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["query"], "А что мне будет?")
+        self.assertEqual(result["cards"][0]["source"], "dify")
+        self.assertEqual(result["cards"][0]["score"], 0.78)
+        self.assertEqual(result["cards"][0]["title"], "value-question.md")
+        self.assertIn("личную пользу", result["cards"][0]["content"])
+
+    def test_agent_pipeline_payload_includes_dify_knowledge_cards(self):
+        with self._db() as db:
+            pipeline = AgentPipeline(
+                id=154,
+                name="Dify-aware n8n pipeline",
+                type="n8n_webhook",
+                status="active",
+                config_json=json.dumps({"mode": "live", "webhook_url": "https://n8n.test/webhook"}),
+            )
+            conversation = Conversation(id=155, account_id=40, tg_user_id="455", tg_first_name="Lead")
+            older = Message(id=156, conversation_id=155, role="assistant", text="Это исследование про найм.")
+            latest = Message(id=157, conversation_id=155, role="user", text="А что я за это получу?")
+            db.add_all([pipeline, conversation, older, latest])
+            db.commit()
+
+            decision = N8nAgentDecision(
+                approved=True,
+                stage="qualification",
+                intent="other",
+                reply_text="Личная польза — краткий итог исследования после серии интервью.",
+                ops_action="none",
+            )
+            dify_result = {
+                "query": "Последнее сообщение пользователя:\nА что я за это получу?",
+                "cards": [
+                    {
+                        "source": "dify",
+                        "title": "value-question.md",
+                        "score": 0.82,
+                        "content": "Коротко объяснить личную пользу, не повторять длинный питч.",
+                        "document_id": "doc-1",
+                        "segment_id": "seg-1",
+                    }
+                ],
+                "error": None,
+                "configured": True,
+            }
+            with patch("backend.pipeline_runner.retrieve_dify_knowledge_cards", AsyncMock(return_value=dify_result)) as retrieve:
+                with patch("backend.pipeline_runner.call_n8n_agent", AsyncMock(return_value=N8nAgentCallResult(ok=True, decision=decision, raw_response=decision.model_dump(mode="json")))) as call:
+                    result = asyncio.run(
+                        run_pipeline_for_auto_reply(
+                            db,
+                            pipeline=pipeline,
+                            conversation=conversation,
+                            messages=[older, latest],
+                            trigger_message_id=157,
+                        )
+                    )
+
+        self.assertTrue(result["ok"])
+        retrieve.assert_awaited_once()
+        self.assertIn("А что я за это получу?", retrieve.await_args.args[0])
+        request = call.await_args.args[0]
+        self.assertEqual(request.knowledge_cards[0]["source"], "dify")
+        self.assertIn("личную пользу", request.knowledge_cards[0]["content"])
+        self.assertEqual(request.settings["knowledge"]["source"], "dify")
+        self.assertEqual(request.settings["knowledge"]["cards_count"], 1)
+
+    def test_dify_retrieval_query_strips_long_urls(self):
+        from backend.pipeline_runner import _dify_retrieval_query
+
+        long_url = "https://calendar.google.com/calendar/render?action=TEMPLATE&text=" + ("a" * 2000)
+        query = _dify_retrieval_query([
+            {"role": "user", "text": "Окей понял! Ладно я готов, можем назначить созвон"},
+            {"role": "assistant", "text": "Отлично. Тогда напишите, пожалуйста, 2–3 удобных окна по Москве, и я подстроюсь."},
+            {"role": "user", "text": "Давай завтра на 4"},
+            {"role": "assistant", "text": "В это время слот уже занят. Свободные альтернативы: 28.04 18:15-18:45 МСК, 28.04 19:00-19:30 МСК, 28.04 19:45-20:15 МСК."},
+            {"role": "assistant", "text": f"Добавьте событие в календарь: {long_url}"},
+            {"role": "user", "text": "А что я за это получу?"},
+        ])
+
+        self.assertIn("А что я за это получу?", query)
+        self.assertIn("[link]", query)
+        self.assertNotIn(long_url, query)
+        self.assertLessEqual(len(query), 250)
 
     def test_list_campaigns_reports_runtime_task_state(self):
         with self._db() as db:
@@ -1237,6 +2597,7 @@ class OutreachRuntimeTests(unittest.TestCase):
             conversation_id=121,
             tg_user_id="421",
             trigger_message_id=message.id,
+            inbound_text="Когда можем созвониться?",
         )
         generate.assert_not_awaited()
         send.assert_not_awaited()
@@ -1257,6 +2618,18 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(delay, 12.5)
         self.assertTrue(old_task.cancelled)
         self.assertIs(tg._pending_auto_reply_tasks[122], new_task)
+
+    def test_auto_reply_delay_classifies_text_and_task_type(self):
+        quick_type = tg._classify_auto_reply_task_type("Что за продукт?")
+        scheduling_type = tg._classify_auto_reply_task_type("Давайте завтра в 16:00")
+        quick_delay = tg._auto_reply_delay_seconds("Что за продукт?", task_type=quick_type, jitter=0)
+        long_delay = tg._auto_reply_delay_seconds("Расскажите подробнее " * 40, task_type="trust", jitter=0)
+        scheduling_delay = tg._auto_reply_delay_seconds("Давайте завтра в 16:00", task_type=scheduling_type, jitter=0)
+
+        self.assertEqual(quick_type, "trust")
+        self.assertEqual(scheduling_type, "booking")
+        self.assertGreater(long_delay, quick_delay)
+        self.assertLessEqual(scheduling_delay, 90)
 
     def test_run_scheduled_auto_reply_waits_then_generates_and_sends(self):
         with self._db() as db:
@@ -1287,6 +2660,7 @@ class OutreachRuntimeTests(unittest.TestCase):
 
         with patch("backend.telegram_client.SessionLocal", self.Session):
             with patch("backend.telegram_client.asyncio.sleep", AsyncMock()) as sleep:
+                tg._clients[23] = FakePresenceClient()
                 with patch("backend.gpt_handler.generate_reply", AsyncMock(return_value="Конечно, расскажу.")) as generate:
                     with patch("backend.telegram_client.send_manual_message", AsyncMock(return_value={"ok": True})) as send:
                         asyncio.run(
@@ -1295,14 +2669,82 @@ class OutreachRuntimeTests(unittest.TestCase):
                                 conversation_id=123,
                                 tg_user_id="423",
                                 trigger_message_id=trigger_id,
-                                delay_s=7.0,
+                                delay_s=17.0,
                                 scheduled_at=tg._utcnow(),
                             )
                         )
 
-        sleep.assert_awaited_once_with(7.0)
+        sleep_values = [call.args[0] for call in sleep.await_args_list]
+        self.assertAlmostEqual(sleep_values[0], 3.4)
+        self.assertAlmostEqual(sleep_values[1], 2.55)
+        self.assertIn(1.5, sleep_values)
+        self.assertIn(3.0, sleep_values)
+        self.assertAlmostEqual(sleep_values[-1], 6.55)
         generate.assert_awaited_once()
         send.assert_awaited_once_with(23, "423", 123, "Конечно, расскажу.")
+
+    def test_send_manual_message_falls_back_to_username_when_peer_id_cache_missing(self):
+        with self._db() as db:
+            db.add(Account(id=52, name="Ana", phone="+573122997152", app_id="2040", app_hash="hash"))
+            db.add(
+                Conversation(
+                    id=152,
+                    account_id=52,
+                    tg_user_id="6289865060",
+                    tg_username="rodmirpronaim",
+                    tg_first_name="Lead",
+                    status="active",
+                )
+            )
+            db.commit()
+
+        client = FakeManualSendClient()
+        tg._clients[52] = client
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            result = asyncio.run(tg.send_manual_message(52, "6289865060", 152, "Ссылка на событие"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.resolved, ["rodmirpronaim"])
+        self.assertEqual(len(client.sent), 2)
+        self.assertIsInstance(client.sent[0][0], int)
+        self.assertEqual(client.sent[1][0].username, "rodmirpronaim")
+
+    def test_send_manual_message_persists_compact_visible_link_text(self):
+        calendar_url = "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Interview&dates=20260428"
+        with self._db() as db:
+            db.add(Account(id=53, name="Ana", phone="+573122997153", app_id="2040", app_hash="hash"))
+            db.add(
+                Conversation(
+                    id=153,
+                    account_id=53,
+                    tg_user_id="6289865060",
+                    tg_username="rodmirpronaim",
+                    tg_first_name="Lead",
+                    status="active",
+                )
+            )
+            db.commit()
+
+        client = FakeManualSendClient()
+        tg._clients[53] = client
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            result = asyncio.run(
+                tg.send_manual_message(
+                    53,
+                    "6289865060",
+                    153,
+                    f"Поставил встречу. Добавьте событие в календарь: {calendar_url}",
+                )
+            )
+
+        with self._db() as db:
+            stored = db.query(Message).filter(Message.conversation_id == 153).order_by(Message.id.desc()).first()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.sent[1][2], {"parse_mode": "html"})
+        self.assertIn("<a href=", client.sent[1][1])
+        self.assertNotIn(calendar_url, stored.text)
+        self.assertEqual(stored.text, "Поставил встречу. Добавьте событие в календарь: ссылка")
 
     def test_run_scheduled_auto_reply_skips_stale_trigger_message(self):
         with self._db() as db:

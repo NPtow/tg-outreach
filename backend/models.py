@@ -38,15 +38,96 @@ class Integration(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Project(Base):
+    """Logical workspace. Campaign content is scoped; accounts/proxies remain reusable."""
+    __tablename__ = "projects"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(120), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(30), default="active")
+    default_timezone = Column(String(50), default="Europe/Moscow")
+    default_calendar_email = Column(String(200), nullable=True)
+    dify_dataset_id = Column(String(200), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    accounts = relationship("ProjectAccount", back_populates="project")
+    proxies = relationship("ProjectProxy", back_populates="project")
+
+
+class ProjectAccount(Base):
+    """Reusable account linked into a project without copying credentials."""
+    __tablename__ = "project_accounts"
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False, index=True)
+    role = Column(String(50), default="outreach")
+    is_default = Column(Boolean, default=False)
+    daily_limit_override = Column(Integer, nullable=True)
+    auto_reply_enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    project = relationship("Project", back_populates="accounts")
+    account = relationship("Account")
+
+
+class ProjectProxy(Base):
+    """Reusable proxy linked into a project without owning the proxy globally."""
+    __tablename__ = "project_proxies"
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    proxy_id = Column(Integer, ForeignKey("proxy_pool.id"), nullable=False, index=True)
+    role = Column(String(50), default="default")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    project = relationship("Project", back_populates="proxies")
+    proxy = relationship("ProxyPool")
+
+
 class PromptTemplate(Base):
     """Reusable GPT prompt presets. Assigned per-account or per-campaign."""
     __tablename__ = "prompt_templates"
 
     id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     name = Column(String(100), nullable=False)
     description = Column(String(300), nullable=True)
     system_prompt = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AgentPipeline(Base):
+    """Reusable auto-reply pipeline. n8n is the first external runner type."""
+    __tablename__ = "agent_pipelines"
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    name = Column(String(120), nullable=False)
+    description = Column(String(500), nullable=True)
+    type = Column(String(40), nullable=False, default="n8n_webhook")
+    status = Column(String(30), nullable=False, default="draft")  # draft | active | archived
+    config_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    versions = relationship("AgentPipelineVersion", back_populates="pipeline")
+
+
+class AgentPipelineVersion(Base):
+    __tablename__ = "agent_pipeline_versions"
+
+    id = Column(Integer, primary_key=True)
+    pipeline_id = Column(Integer, ForeignKey("agent_pipelines.id"), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    config_json = Column(Text, nullable=False, default="{}")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    created_by = Column(String(100), nullable=True)
+
+    pipeline = relationship("AgentPipeline", back_populates="versions")
 
 
 class DoNotContact(Base):
@@ -94,6 +175,7 @@ class Account(Base):
     proxy_last_rtt_ms = Column(Integer, nullable=True)
     # Custom prompt for this account (overrides campaign and global prompts)
     prompt_template_id = Column(Integer, ForeignKey("prompt_templates.id"), nullable=True)
+    agent_pipeline_id = Column(Integer, ForeignKey("agent_pipelines.id"), nullable=True)
     # Device fingerprint — generated once, immutable. Makes client look like real Telegram Desktop.
     device_model = Column(String(100), nullable=True)
     system_version = Column(String(100), nullable=True)
@@ -102,12 +184,14 @@ class Account(Base):
 
     conversations = relationship("Conversation", back_populates="account")
     prompt_template = relationship("PromptTemplate", foreign_keys=[prompt_template_id])
+    agent_pipeline = relationship("AgentPipeline", foreign_keys=[agent_pipeline_id])
 
 
 class Conversation(Base):
     __tablename__ = "conversations"
 
     id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
     tg_user_id = Column(String(50), nullable=False)
     tg_username = Column(String(100))
@@ -144,6 +228,7 @@ class ScheduledMeeting(Base):
     __tablename__ = "scheduled_meetings"
 
     id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False, index=True)
     status = Column(String(30), default="scheduled")
     scheduled_start = Column(DateTime, nullable=False)
@@ -151,8 +236,48 @@ class ScheduledMeeting(Base):
     timezone = Column(String(50), default="Europe/Moscow")
     calendar_event_id = Column(String(200), nullable=True)
     calendar_html_link = Column(Text, nullable=True)
+    calendar_add_url = Column(Text, nullable=True)
     zoom_meeting_id = Column(String(100), nullable=True)
     zoom_join_url = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AgentRun(Base):
+    """Inspectable trace for agent decisions, sandbox replays, and evals."""
+    __tablename__ = "agent_runs"
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=True, index=True)
+    run_type = Column(String(50), nullable=False)
+    model = Column(String(100), nullable=True)
+    input_json = Column(Text, nullable=False)
+    output_json = Column(Text, nullable=True)
+    status = Column(String(30), default="succeeded")
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+
+class ScenarioCard(Base):
+    """Reusable conversation scenario mined from real chats or created manually."""
+    __tablename__ = "scenario_cards"
+
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    title = Column(String(200), nullable=False)
+    intent = Column(String(100), nullable=False)
+    trigger_summary = Column(Text, nullable=False)
+    recommended_reply = Column(Text, nullable=False)
+    avoid_reply = Column(Text, nullable=True)
+    tags = Column(String(300), nullable=True)
+    status = Column(String(30), default="draft")
+    source_conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=True)
+    dify_document_id = Column(String(100), nullable=True)
+    dify_sync_status = Column(String(30), nullable=True)
+    dify_sync_error = Column(Text, nullable=True)
+    dify_synced_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -162,6 +287,7 @@ class ContactBatch(Base):
     __tablename__ = "contact_batches"
 
     id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     name = Column(String(200), nullable=False)  # filename or custom label
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -173,6 +299,7 @@ class Contact(Base):
     __tablename__ = "contacts"
 
     id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     username = Column(String(100), nullable=False, index=True)
     display_name = Column(String(100), nullable=True)   # {first_name}
     company = Column(String(200), nullable=True)        # {company}
@@ -189,6 +316,7 @@ class Campaign(Base):
     __tablename__ = "campaigns"
 
     id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     name = Column(String(100), nullable=False)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
     account_ids = Column(Text, nullable=True)  # JSON list e.g. "[1,2,3]"; if set, overrides account_id
@@ -203,6 +331,7 @@ class Campaign(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     # Campaign prompt for auto-replies when the account has no prompt
     prompt_template_id = Column(Integer, ForeignKey("prompt_templates.id"), nullable=True)
+    agent_pipeline_id = Column(Integer, ForeignKey("agent_pipelines.id"), nullable=True)
     # Stop conditions
     stop_on_reply = Column(Boolean, default=False)   # pause auto-reply when person responds
     stop_keywords = Column(Text, nullable=True)      # comma-separated: "нет,отписка,стоп"
@@ -210,6 +339,7 @@ class Campaign(Base):
     max_messages = Column(Integer, nullable=True)    # max GPT replies per conversation
     targets = relationship("CampaignTarget", back_populates="campaign")
     prompt_template = relationship("PromptTemplate", foreign_keys=[prompt_template_id])
+    agent_pipeline = relationship("AgentPipeline", foreign_keys=[agent_pipeline_id])
 
 
 class CampaignTarget(Base):

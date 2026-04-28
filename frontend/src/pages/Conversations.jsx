@@ -33,7 +33,7 @@ function inputCls() {
   return "w-full rounded-2xl border border-white/10 bg-white/[0.04] px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 outline-none transition focus:border-sky-400/40 focus:bg-white/[0.05]";
 }
 
-export default function Conversations() {
+export default function Conversations({ projectId }) {
   const [conversations, setConversations] = useState([]);
   const [accounts, setAccounts] = useState([]);
   const [campaigns, setCampaigns] = useState([]);
@@ -53,18 +53,19 @@ export default function Conversations() {
       status: filters.status || undefined,
       search: filters.search || undefined,
       campaign_id: filters.campaign_id || undefined,
+      project_id: projectId || undefined,
       unread_only: filters.unread_only || undefined,
       is_hot: filters.is_hot || undefined,
     }).then(setConversations);
 
   useEffect(() => {
     api.getAccounts().then(setAccounts);
-    api.getCampaigns().then(setCampaigns);
-  }, []);
+    api.getCampaigns(projectId).then(setCampaigns);
+  }, [projectId]);
 
   useEffect(() => {
     load();
-  }, [filters]);
+  }, [filters, projectId]);
 
   useWsEvent((event) => {
     if (event.event === "new_message" || event.event === "hot_lead") load();

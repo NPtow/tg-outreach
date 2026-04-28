@@ -26,7 +26,7 @@ function Modal({ title, onClose, children }) {
   );
 }
 
-function AddModal({ onClose, onAdded }) {
+function AddModal({ projectId, onClose, onAdded }) {
   const [form, setForm] = useState({ username: "", display_name: "", company: "", role: "", custom_note: "", tags: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -36,7 +36,7 @@ function AddModal({ onClose, onAdded }) {
     if (!form.username.trim()) { setError("Username обязателен"); return; }
     setLoading(true); setError("");
     try {
-      await api.createContact(form);
+      await api.createContact({ ...form, project_id: projectId });
       onAdded();
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
@@ -68,7 +68,7 @@ function AddModal({ onClose, onAdded }) {
   );
 }
 
-function ImportModal({ onClose, onImported }) {
+function ImportModal({ projectId, onClose, onImported }) {
   const [csvText, setCsvText] = useState("");
   const [batchName, setBatchName] = useState("");
   const [loading, setLoading] = useState(false);
@@ -89,7 +89,7 @@ function ImportModal({ onClose, onImported }) {
     if (!csvText.trim()) { setError("Вставь CSV или загрузи файл"); return; }
     setLoading(true); setError(""); setResult(null);
     try {
-      const r = await api.importContacts(csvText, batchName);
+      const r = await api.importContacts(csvText, batchName, projectId);
       setResult(r);
       onImported();
     } catch (e) { setError(e.message); }
@@ -150,11 +150,11 @@ function ImportModal({ onClose, onImported }) {
 
 // ── Batch list view ──────────────────────────────────────────────────────────
 
-function BatchList({ onDrillDown, onRefresh }) {
+function BatchList({ projectId, onDrillDown, onRefresh }) {
   const [batches, setBatches] = useState([]);
 
-  const load = () => api.getContactBatches().then(setBatches);
-  useEffect(() => { load(); }, []);
+  const load = () => api.getContactBatches(projectId).then(setBatches);
+  useEffect(() => { load(); }, [projectId]);
 
   // expose refresh
   useEffect(() => { onRefresh(load); }, []);
@@ -208,13 +208,13 @@ function BatchList({ onDrillDown, onRefresh }) {
 
 // ── Contact table (inside a batch) ──────────────────────────────────────────
 
-function ContactTable({ batchId, onBack, onBatchDeleted }) {
+function ContactTable({ projectId, batchId, onBack, onBatchDeleted }) {
   const [contacts, setContacts] = useState([]);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(new Set());
 
-  const load = (q = search) => api.getContacts(q, batchId).then(setContacts);
-  useEffect(() => { load(); }, [batchId]);
+  const load = (q = search) => api.getContacts(q, batchId, projectId).then(setContacts);
+  useEffect(() => { load(); }, [batchId, projectId]);
 
   const handleSearch = v => { setSearch(v); load(v); };
 
@@ -314,11 +314,15 @@ function ContactTable({ batchId, onBack, onBatchDeleted }) {
 
 // ── Main page ────────────────────────────────────────────────────────────────
 
-export default function Contacts() {
+export default function Contacts({ projectId }) {
   const [activeBatch, setActiveBatch] = useState(null); // null = batch list view
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [refreshBatches, setRefreshBatches] = useState(null);
+
+  useEffect(() => {
+    setActiveBatch(null);
+  }, [projectId]);
 
   const handleImported = () => {
     if (refreshBatches) refreshBatches();
@@ -346,18 +350,20 @@ export default function Contacts() {
       {activeBatch ? (
         <ContactTable
           batchId={activeBatch.id}
+          projectId={projectId}
           onBack={() => setActiveBatch(null)}
           onBatchDeleted={() => { setActiveBatch(null); if (refreshBatches) refreshBatches(); }}
         />
       ) : (
         <BatchList
+          projectId={projectId}
           onDrillDown={setActiveBatch}
           onRefresh={fn => setRefreshBatches(() => fn)}
         />
       )}
 
-      {showAdd && <AddModal onClose={() => setShowAdd(false)} onAdded={handleAdded} />}
-      {showImport && <ImportModal onClose={() => setShowImport(false)} onImported={handleImported} />}
+      {showAdd && <AddModal projectId={projectId} onClose={() => setShowAdd(false)} onAdded={handleAdded} />}
+      {showImport && <ImportModal projectId={projectId} onClose={() => setShowImport(false)} onImported={handleImported} />}
     </div>
   );
 }

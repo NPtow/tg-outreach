@@ -67,6 +67,10 @@ class SetPromptRequest(BaseModel):
     prompt_template_id: Optional[int]
 
 
+class SetPipelineRequest(BaseModel):
+    agent_pipeline_id: Optional[int]
+
+
 class SetSessionRequest(BaseModel):
     session_string: str
 
@@ -406,6 +410,16 @@ def set_prompt(account_id: int, data: SetPromptRequest, db: Session = Depends(ge
     acc.prompt_template_id = data.prompt_template_id
     db.commit()
     return {"ok": True, "prompt_template_id": acc.prompt_template_id}
+
+
+@router.post("/{account_id}/set-pipeline")
+def set_pipeline(account_id: int, data: SetPipelineRequest, db: Session = Depends(get_db)):
+    acc = db.query(Account).filter(Account.id == account_id).first()
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    acc.agent_pipeline_id = data.agent_pipeline_id
+    db.commit()
+    return {"ok": True, "agent_pipeline_id": acc.agent_pipeline_id}
 
 
 @router.post("/import-tdata")

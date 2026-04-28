@@ -27,6 +27,7 @@ def list_conversations(
     status: Optional[str] = None,
     search: Optional[str] = None,
     campaign_id: Optional[int] = None,
+    project_id: Optional[int] = None,
     unread_only: Optional[bool] = None,
     is_hot: Optional[bool] = None,
     db: Session = Depends(get_db),
@@ -34,6 +35,8 @@ def list_conversations(
     q = db.query(Conversation)
     if account_id:
         q = q.filter(Conversation.account_id == account_id)
+    if project_id is not None:
+        q = q.filter(Conversation.project_id == int(project_id))
     if status:
         q = q.filter(Conversation.status == status)
     if search:
@@ -58,6 +61,7 @@ def list_conversations(
             campaign_name = camp.name if camp else None
         result.append({
             "id": c.id,
+            "project_id": c.project_id,
             "account_id": c.account_id,
             "account_name": acc.name if acc else "",
             "tg_user_id": c.tg_user_id,
@@ -87,6 +91,7 @@ def get_messages(conv_id: int, db: Session = Depends(get_db)):
     return {
         "conversation": {
             "id": conv.id,
+            "project_id": conv.project_id,
             "tg_username": conv.tg_username,
             "tg_first_name": conv.tg_first_name,
             "tg_last_name": conv.tg_last_name,
