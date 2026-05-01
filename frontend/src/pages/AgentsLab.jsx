@@ -1,68 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import { EmptyState, PageHeader, SectionLabel, Surface } from "../components/workspace";
+import { EmptyState } from "../components/workspace";
 
 const inputCls = "w-full rounded-2xl border border-white/10 bg-black/25 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none transition focus:border-sky-400/40 focus:bg-white/[0.05]";
-
-const TABS = [
-  { key: "documents", label: "Документы", hint: "Папки и редактор" },
-  { key: "scenarios", label: "Старые сценарии", hint: "Старый формат" },
-  { key: "sandbox", label: "Песочница", hint: "Без отправки" },
-  { key: "runs", label: "Журнал", hint: "Логи решений" },
-  { key: "connection", label: "Подключение", hint: "Dify и импорт" },
-];
-
 const EMPTY_DRAFT = { name: "", text: "" };
-
-function JsonBlock({ data }) {
-  if (!data) return null;
-  return (
-    <pre className="max-h-[380px] overflow-auto rounded-2xl border border-white/8 bg-black/35 p-4 text-xs leading-5 text-zinc-300">
-      {JSON.stringify(data, null, 2)}
-    </pre>
-  );
-}
-
-function Card({ title, children, action, className = "" }) {
-  return (
-    <Surface className={`p-5 ${className}`}>
-      <div className="mb-4 flex items-start justify-between gap-3">
-        <h2 className="text-sm font-semibold uppercase tracking-[0.22em] text-zinc-500">{title}</h2>
-        {action}
-      </div>
-      {children}
-    </Surface>
-  );
-}
-
-function Badge({ children, className = "" }) {
-  return (
-    <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${className}`}>
-      {children}
-    </span>
-  );
-}
-
-function statusTone(status) {
-  if (status === "active") return "border-emerald-400/20 bg-emerald-400/10 text-emerald-200";
-  if (status === "suggested") return "border-amber-400/20 bg-amber-400/10 text-amber-200";
-  if (status === "draft") return "border-sky-400/20 bg-sky-400/10 text-sky-200";
-  if (status === "legacy") return "border-zinc-400/15 bg-zinc-400/10 text-zinc-300";
-  return "border-white/10 bg-white/5 text-zinc-300";
-}
-
-function statusLabel(scenario) {
-  return scenario.status_label || {
-    active: "Активен",
-    suggested: "Предложен",
-    draft: "Черновик",
-    legacy: "Архив",
-  }[scenario.status] || scenario.status || "Без статуса";
-}
-
-function intentLabel(scenario) {
-  return scenario.intent_label || scenario.intent || "Без типа";
-}
 
 function docStatusLabel(status) {
   return {
@@ -85,13 +26,15 @@ function docStatusTone(status) {
 }
 
 function documentFolder(document) {
-  const name = (document.name || "").toLowerCase();
-  if (name.startsWith("scenario-") || name.includes("сценар")) return "Сценарии";
-  if (name.startsWith("core-") || name.includes("context") || name.includes("контекст")) return "Контекст";
-  if (name.includes("example") || name.includes("conversation") || name.includes("пример")) return "Примеры переписок";
-  if (name.includes("negative") || name.includes("mistake") || name.includes("ошиб")) return "Негативные паттерны";
-  if (name.includes("eval") || name.includes("test") || name.includes("провер")) return "Тестовые кейсы";
-  return "Документы";
+  const name = (document.name || "").trim();
+  const normalized = name.toLowerCase();
+  if (name.includes("/")) return name.split("/").slice(0, -1).join("/") || "Корень";
+  if (normalized.startsWith("core-") || normalized.includes("context") || normalized.includes("контекст")) return "Контекст";
+  if (normalized.startsWith("scenario-") || normalized.includes("сценар")) return "Сценарии";
+  if (normalized.includes("example") || normalized.includes("conversation") || normalized.includes("пример")) return "Примеры";
+  if (normalized.includes("negative") || normalized.includes("mistake") || normalized.includes("ошиб")) return "Ошибки";
+  if (normalized.includes("eval") || normalized.includes("test") || normalized.includes("провер")) return "Тесты";
+  return "Корень";
 }
 
 function groupDocuments(documents) {
@@ -101,227 +44,138 @@ function groupDocuments(documents) {
     if (!groups.has(folder)) groups.set(folder, []);
     groups.get(folder).push(document);
   }
-  return Array.from(groups.entries()).map(([folder, items]) => ({
-    folder,
-    items: items.sort((a, b) => (a.name || "").localeCompare(b.name || "")),
-  }));
+  return Array.from(groups.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([folder, items]) => ({
+      folder,
+      items: items.sort((a, b) => (a.name || "").localeCompare(b.name || "")),
+    }));
 }
 
-function ScenarioItem({ scenario, selected, onSelect, onActivate }) {
+function fileName(name = "") {
+  return name.split("/").filter(Boolean).at(-1) || name || "Без названия";
+}
+
+function formatDate(value) {
+  if (!value) return "нет";
+  const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function Badge({ children, className = "" }) {
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => onSelect(scenario)}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") onSelect(scenario);
-      }}
-      className={`w-full rounded-2xl border p-4 text-left transition ${
-        selected ? "border-sky-400/35 bg-sky-400/10" : "border-white/8 bg-black/20 hover:border-white/16 hover:bg-white/[0.04]"
+    <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${className}`}>
+      {children}
+    </span>
+  );
+}
+
+function ToolbarButton({ children, onClick, disabled = false, danger = false }) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={`rounded-2xl border px-3.5 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
+        danger
+          ? "border-rose-400/20 bg-rose-400/10 text-rose-100 hover:bg-rose-400/15"
+          : "border-white/10 bg-white/[0.04] text-zinc-200 hover:border-white/20 hover:bg-white/[0.08]"
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-sm font-semibold text-white">{scenario.title}</div>
-          <div className="mt-1 text-xs text-zinc-500">{intentLabel(scenario)}</div>
-        </div>
-        <Badge className={statusTone(scenario.status)}>{statusLabel(scenario)}</Badge>
-      </div>
-      <p className="mt-3 line-clamp-2 text-sm leading-6 text-zinc-300">{scenario.trigger_summary}</p>
-      {scenario.status !== "active" && scenario.status !== "legacy" ? (
-        <div className="mt-3">
-          <button
-            type="button"
-            className="inline-flex rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-zinc-200"
-            onClick={(event) => {
-              event.stopPropagation();
-              onActivate(scenario.id);
-            }}
-          >
-            Одобрить
-          </button>
-        </div>
-      ) : null}
-    </div>
+      {children}
+    </button>
   );
 }
 
-function ScenarioDetail({ scenario, onActivate, onReplaySource }) {
-  if (!scenario) {
-    return (
-      <Surface className="p-5">
-        <EmptyState compact icon="С" title="Выбери сценарий" description="Это старый формат. Основная база теперь редактируется во вкладке «Документы»." />
-      </Surface>
-    );
+function MarkdownPreview({ text }) {
+  const lines = text.split("\n");
+  if (!text.trim()) {
+    return <div className="p-8 text-sm text-zinc-500">Документ пустой.</div>;
   }
-
   return (
-    <Surface className="sticky top-6 p-5">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">Детали сценария</div>
-          <h2 className="mt-3 text-xl font-semibold leading-tight text-white">{scenario.title}</h2>
-          <div className="mt-2 text-sm text-zinc-500">{intentLabel(scenario)}</div>
-        </div>
-        <Badge className={statusTone(scenario.status)}>{statusLabel(scenario)}</Badge>
-      </div>
-
-      <div className="mt-5 space-y-4">
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">ID и Dify</div>
-          <div className="mt-2 grid gap-2 text-xs sm:grid-cols-3">
-            <div className="rounded-2xl border border-white/8 bg-black/20 p-3">
-              <div className="text-zinc-500">ID сценария</div>
-              <div className="mt-1 text-zinc-200">#{scenario.id}</div>
-            </div>
-            <div className="rounded-2xl border border-white/8 bg-black/20 p-3">
-              <div className="text-zinc-500">ID документа Dify</div>
-              <div className="mt-1 truncate text-zinc-200">{scenario.dify_document_id || "нет"}</div>
-            </div>
-            <div className="rounded-2xl border border-white/8 bg-black/20 p-3">
-              <div className="text-zinc-500">Статус Dify</div>
-              <div className="mt-1 truncate text-zinc-200">{scenario.dify_sync_status || "не синхронизирован"}</div>
-            </div>
-          </div>
-          {scenario.dify_sync_error ? (
-            <div className="mt-2 rounded-2xl border border-rose-400/20 bg-rose-400/10 p-3 text-xs leading-5 text-rose-100">
-              {scenario.dify_sync_error}
-            </div>
-          ) : null}
-        </div>
-        <QuestionBlock questions={scenario.example_questions || []} />
-        <DetailBlock title="Когда применять" text={scenario.trigger_summary} />
-        <DetailBlock title="Как отвечать" text={scenario.recommended_reply} pre />
-        {scenario.avoid_reply ? <DetailBlock title="Чего избегать" text={scenario.avoid_reply} /> : null}
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">Источник</div>
-          <div className="mt-2 rounded-2xl border border-white/8 bg-black/20 p-3 text-sm text-zinc-300">
-            {scenario.source_conversation_id ? `Переписка #${scenario.source_conversation_id}` : "Ручной сценарий или базовый пакет"}
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-5 flex flex-wrap gap-2">
-        {scenario.status !== "active" && scenario.status !== "legacy" ? (
-          <button className="btn-primary" onClick={() => onActivate(scenario.id)}>Одобрить сценарий</button>
-        ) : null}
-        {scenario.source_conversation_id ? (
-          <button className="btn-ghost" onClick={() => onReplaySource(scenario.source_conversation_id)}>Проверить источник в песочнице</button>
-        ) : null}
-      </div>
-    </Surface>
-  );
-}
-
-function QuestionBlock({ questions }) {
-  if (!questions.length) return null;
-  return (
-    <div>
-      <div className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">На какие вопросы отвечает</div>
-      <div className="mt-2 space-y-2">
-        {questions.map((question) => (
-          <div key={question} className="rounded-2xl border border-sky-400/12 bg-sky-400/8 px-3 py-2 text-sm leading-6 text-sky-100">
-            {question}
-          </div>
-        ))}
-      </div>
+    <div className="space-y-3 p-8 text-zinc-200">
+      {lines.map((line, index) => {
+        const key = `${index}-${line}`;
+        if (!line.trim()) return <div key={key} className="h-2" />;
+        if (line.startsWith("# ")) return <h1 key={key} className="text-3xl font-semibold tracking-tight text-white">{line.slice(2)}</h1>;
+        if (line.startsWith("## ")) return <h2 key={key} className="pt-4 text-xl font-semibold text-white">{line.slice(3)}</h2>;
+        if (line.startsWith("### ")) return <h3 key={key} className="pt-3 text-base font-semibold text-zinc-100">{line.slice(4)}</h3>;
+        if (line.startsWith("- ")) return <div key={key} className="pl-4 text-sm leading-7 text-zinc-300">• {line.slice(2)}</div>;
+        if (/^\d+\.\s/.test(line)) return <div key={key} className="pl-4 text-sm leading-7 text-zinc-300">{line}</div>;
+        if (line.startsWith("```")) return <div key={key} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 font-mono text-xs text-zinc-400">{line}</div>;
+        return <p key={key} className="text-sm leading-7 text-zinc-300">{line}</p>;
+      })}
     </div>
   );
 }
 
-function DetailBlock({ title, text, pre = false }) {
-  return (
-    <div>
-      <div className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">{title}</div>
-      <div className={`mt-2 rounded-2xl border border-white/8 bg-black/20 p-3 text-sm leading-6 text-zinc-300 ${pre ? "whitespace-pre-wrap" : ""}`}>
-        {text}
-      </div>
-    </div>
-  );
-}
-
-export default function AgentsLab({ projectId }) {
-  const [activeTab, setActiveTab] = useState("documents");
-  const [scenarios, setScenarios] = useState([]);
-  const [scenarioGroups, setScenarioGroups] = useState([]);
-  const [selectedScenario, setSelectedScenario] = useState(null);
-  const [runs, setRuns] = useState([]);
-  const [conversationId, setConversationId] = useState("");
-  const [candidatePrompt, setCandidatePrompt] = useState("");
-  const [sandboxEngine, setSandboxEngine] = useState("local");
-  const [sandboxResult, setSandboxResult] = useState(null);
-  const [analyzeResult, setAnalyzeResult] = useState(null);
+export default function AgentsLab() {
   const [difyStatus, setDifyStatus] = useState(null);
-  const [difyResult, setDifyResult] = useState(null);
   const [documents, setDocuments] = useState([]);
   const [selectedDocumentId, setSelectedDocumentId] = useState("");
   const [documentDetail, setDocumentDetail] = useState(null);
   const [documentDraft, setDocumentDraft] = useState(EMPTY_DRAFT);
   const [savedDocumentDraft, setSavedDocumentDraft] = useState(EMPTY_DRAFT);
   const [documentSearch, setDocumentSearch] = useState("");
-  const [documentResult, setDocumentResult] = useState(null);
   const [documentError, setDocumentError] = useState("");
-  const [documentLoading, setDocumentLoading] = useState(false);
-  const [scenarioForm, setScenarioForm] = useState({
-    title: "",
-    intent: "context_question",
-    trigger_summary: "",
-    recommended_reply: "",
-    tags: "",
-    status: "draft",
-  });
+  const [documentMessage, setDocumentMessage] = useState("");
   const [busy, setBusy] = useState("");
+  const [mode, setMode] = useState("edit");
 
-  const loadDocuments = async (keyword = documentSearch) => {
-    try {
-      setDocumentError("");
-      const payload = await api.getDifyDocuments({ limit: 100, keyword });
-      const items = payload.data || [];
-      setDocuments(items);
-      setSelectedDocumentId((current) => {
-        if (current && items.some((item) => item.id === current)) return current;
-        return items[0]?.id || "";
-      });
-    } catch (error) {
-      setDocuments([]);
-      setDocumentError(error.message);
-    }
-  };
+  const selectedDocument = documents.find((item) => item.id === selectedDocumentId) || documentDetail?.document || null;
+  const documentGroups = useMemo(() => groupDocuments(documents), [documents]);
+  const filteredGroups = useMemo(() => {
+    const query = documentSearch.trim().toLowerCase();
+    if (!query) return documentGroups;
+    return groupDocuments(
+      documents.filter((document) => {
+        const name = (document.name || "").toLowerCase();
+        const folder = documentFolder(document).toLowerCase();
+        return name.includes(query) || folder.includes(query);
+      })
+    );
+  }, [documentGroups, documents, documentSearch]);
+  const hasChanges = documentDraft.name !== savedDocumentDraft.name || documentDraft.text !== savedDocumentDraft.text;
 
-  const load = async () => {
-    const [scenarioData, groupedScenarioData, runData, difyStatusData] = await Promise.all([
-      api.getScenarios("", projectId),
-      api.getGroupedScenarios("", projectId),
-      api.getAgentRuns({ project_id: projectId }),
-      api.getDifyConnectionStatus().catch(() => api.getDifyStatus()),
-    ]);
-    setScenarios(scenarioData);
-    setScenarioGroups(groupedScenarioData);
-    setRuns(runData);
-    setDifyStatus(difyStatusData);
-    setSelectedScenario((current) => {
-      if (current && scenarioData.some((item) => item.id === current.id)) {
-        return scenarioData.find((item) => item.id === current.id);
-      }
-      return scenarioData[0] || null;
+  const loadDocuments = async () => {
+    setDocumentError("");
+    const payload = await api.getDifyDocuments({ limit: 100 });
+    const items = payload.data || [];
+    setDocuments(items);
+    setSelectedDocumentId((current) => {
+      if (current && items.some((item) => item.id === current)) return current;
+      return items[0]?.id || "";
     });
-    if (difyStatusData.configured) {
-      await loadDocuments(documentSearch);
-    } else {
-      setDocuments([]);
-      setDocumentError("");
-    }
   };
 
-  useEffect(() => { load(); }, [projectId]);
+  const loadAll = async () => {
+    setBusy("load");
+    try {
+      const status = await api.getDifyConnectionStatus().catch(() => api.getDifyStatus());
+      setDifyStatus(status);
+      if (status.configured) {
+        await loadDocuments();
+      } else {
+        setDocuments([]);
+        setDocumentError("Dify не подключен. Проверь переменные окружения сервера.");
+      }
+    } catch (error) {
+      setDocumentError(error.message);
+    } finally {
+      setBusy("");
+    }
+  };
 
   useEffect(() => {
-    if (!selectedDocumentId) {
-      setDocumentDetail(null);
-      return;
-    }
+    loadAll();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedDocumentId) return;
     let cancelled = false;
-    setDocumentLoading(true);
+    setBusy("detail");
+    setDocumentMessage("");
     api.getDifyDocument(selectedDocumentId)
       .then((detail) => {
         if (cancelled) return;
@@ -332,647 +186,281 @@ export default function AgentsLab({ projectId }) {
         setDocumentDetail(detail);
         setDocumentDraft(nextDraft);
         setSavedDocumentDraft(nextDraft);
-        setDocumentResult(null);
       })
       .catch((error) => {
         if (!cancelled) setDocumentError(error.message);
       })
       .finally(() => {
-        if (!cancelled) setDocumentLoading(false);
+        if (!cancelled) setBusy("");
       });
     return () => {
       cancelled = true;
     };
   }, [selectedDocumentId]);
 
-  const documentGroups = useMemo(() => groupDocuments(documents), [documents]);
-  const activeCount = scenarios.filter((item) => item.status === "active").length;
-  const archivedCount = scenarios.filter((item) => item.status === "legacy").length;
-  const selectedId = selectedScenario?.id;
-  const selectedDocument = documents.find((item) => item.id === selectedDocumentId) || documentDetail?.document || null;
-  const hasDocumentChanges = documentDraft.name !== savedDocumentDraft.name || documentDraft.text !== savedDocumentDraft.text;
-
-  const runSandbox = async () => {
-    if (!conversationId) return;
-    setBusy("sandbox");
-    try {
-      const result = await api.replaySandbox({
-        conversation_id: Number(conversationId),
-        candidate_prompt: candidatePrompt,
-        dry_run_tools: true,
-        engine: sandboxEngine,
-        model: sandboxEngine === "n8n" ? "n8n-agent" : "local-heuristic-agent",
-      });
-      setSandboxResult(result);
-      await load();
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const mineScenario = async () => {
-    if (!conversationId) return;
-    setBusy("mine");
-    try {
-      const scenario = await api.mineScenario(Number(conversationId));
-      setSelectedScenario(scenario);
-      setActiveTab("scenarios");
-      await load();
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const createScenario = async () => {
-    setBusy("create");
-    try {
-      const scenario = await api.createScenario({ ...scenarioForm, project_id: projectId });
-      setSelectedScenario(scenario);
-      setScenarioForm({ title: "", intent: "context_question", trigger_summary: "", recommended_reply: "", tags: "", status: "draft" });
-      await load();
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const seedFounderPack = async () => {
-    setBusy("seed-pack");
-    try {
-      await api.seedFounderResearchPack(projectId);
-      await load();
-      setActiveTab("scenarios");
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const analyzeConversations = async () => {
-    setBusy("analyze");
-    try {
-      const result = await api.analyzeConversationsForScenarios(50, projectId);
-      setAnalyzeResult(result);
-      await load();
-      setActiveTab("scenarios");
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const syncDify = async () => {
-    setBusy("dify-sync");
-    try {
-      const result = await api.syncDifyScenarios("active");
-      setDifyResult(result);
-      await load();
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const activateScenario = async (id) => {
-    const scenario = await api.activateScenario(id);
-    setSelectedScenario(scenario);
-    await load();
-  };
-
-  const replaySource = (id) => {
-    setConversationId(String(id));
-    setActiveTab("sandbox");
-  };
-
   const createNewDocument = () => {
     const nextDraft = {
-      name: "new-knowledge-note.md",
-      text: "# Новый документ\n\nОпиши здесь правило, пример переписки или контекст для агента.",
+      name: "Новый документ.md",
+      text: "# Новый документ\n\nДобавь сюда правило, пример, контекст или инструкцию для базы знаний.",
     };
     setSelectedDocumentId("");
     setDocumentDetail(null);
     setDocumentDraft(nextDraft);
     setSavedDocumentDraft(EMPTY_DRAFT);
-    setDocumentResult(null);
-    setDocumentError("");
+    setDocumentMessage("Новый документ еще не сохранен в Dify.");
+    setMode("edit");
   };
 
   const saveDocument = async () => {
     if (!documentDraft.name.trim() || !documentDraft.text.trim()) return;
-    setBusy("document-save");
+    setBusy("save");
+    setDocumentError("");
     try {
-      const payload = {
-        name: documentDraft.name.trim(),
-        text: documentDraft.text.trim(),
-      };
+      const payload = { name: documentDraft.name.trim(), text: documentDraft.text.trim() };
       const result = selectedDocumentId
         ? await api.updateDifyDocument(selectedDocumentId, payload)
         : await api.createDifyDocument(payload);
-      setDocumentResult(result);
       setSavedDocumentDraft(payload);
-      await loadDocuments(documentSearch);
+      setDocumentMessage("Сохранено в Dify.");
+      await loadDocuments();
       if (!selectedDocumentId && result.document_id) {
         setSelectedDocumentId(result.document_id);
-      } else if (selectedDocumentId) {
-        const detail = await api.getDifyDocument(selectedDocumentId);
-        const nextDraft = {
-          name: detail.document?.name || payload.name,
-          text: detail.text || payload.text,
-        };
-        setDocumentDetail(detail);
-        setDocumentDraft(nextDraft);
-        setSavedDocumentDraft(nextDraft);
       }
+    } catch (error) {
+      setDocumentError(error.message);
     } finally {
       setBusy("");
     }
   };
 
-  const renderTab = () => {
-    if (activeTab === "documents") {
-      return (
-        <KnowledgeDocumentsWorkspace
-          difyStatus={difyStatus}
-          documents={documents}
-          documentGroups={documentGroups}
-          selectedDocument={selectedDocument}
-          selectedDocumentId={selectedDocumentId}
-          documentDetail={documentDetail}
-          documentDraft={documentDraft}
-          setDocumentDraft={setDocumentDraft}
-          setSelectedDocumentId={setSelectedDocumentId}
-          documentSearch={documentSearch}
-          setDocumentSearch={setDocumentSearch}
-          documentError={documentError}
-          documentLoading={documentLoading}
-          documentResult={documentResult}
-          hasDocumentChanges={hasDocumentChanges}
-          busy={busy}
-          createNewDocument={createNewDocument}
-          saveDocument={saveDocument}
-          reloadDocuments={() => loadDocuments(documentSearch)}
-        />
-      );
+  const deleteDocument = async () => {
+    if (!selectedDocumentId || !selectedDocument) return;
+    const ok = window.confirm(`Удалить документ «${selectedDocument.name}» из Dify?`);
+    if (!ok) return;
+    setBusy("delete");
+    setDocumentError("");
+    try {
+      await api.deleteDifyDocument(selectedDocumentId);
+      setDocumentDetail(null);
+      setDocumentDraft(EMPTY_DRAFT);
+      setSavedDocumentDraft(EMPTY_DRAFT);
+      setDocumentMessage("Документ удален.");
+      const payload = await api.getDifyDocuments({ limit: 100 });
+      const items = payload.data || [];
+      setDocuments(items);
+      setSelectedDocumentId(items[0]?.id || "");
+    } catch (error) {
+      setDocumentError(error.message);
+    } finally {
+      setBusy("");
     }
+  };
 
-    if (activeTab === "scenarios") {
-      return (
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_580px]">
-          <div className="space-y-5">
-            <Card
-              title="Старые сценарии"
-              action={
-                <div className="flex flex-wrap gap-2">
-                  <button className="btn-ghost" onClick={seedFounderPack} disabled={busy === "seed-pack"}>Загрузить базовый пакет</button>
-                  <button className="btn-primary" onClick={analyzeConversations} disabled={busy === "analyze"}>{busy === "analyze" ? "Анализирую..." : "Проанализировать переписки"}</button>
-                </div>
-              }
-            >
-              <div className="mb-5 rounded-3xl border border-white/8 bg-white/[0.03] p-4 text-sm leading-6 text-zinc-400">
-                Это старый структурированный слой. Он оставлен для совместимости и переноса в Dify. Новую информацию лучше хранить во вкладке «Документы».
-              </div>
-              {analyzeResult ? (
-                <div className="mb-4 grid gap-3 sm:grid-cols-4">
-                  <Metric label="Создано" value={analyzeResult.created} />
-                  <Metric label="Обновлено" value={analyzeResult.updated || 0} />
-                  <Metric label="Пропущено" value={analyzeResult.skipped} />
-                  <Metric label="В очереди" value={analyzeResult.total_suggested} />
-                </div>
-              ) : null}
-              <div className="space-y-3">
-                {scenarioGroups.length === 0 ? (
-                  <EmptyState
-                    compact
-                    icon="С"
-                    title="Старые сценарии не загружены"
-                    description="Можно загрузить базовый пакет или анализировать переписки. Основной редактор базы находится во вкладке «Документы»."
-                    action={<button className="btn-primary" onClick={seedFounderPack} disabled={busy === "seed-pack"}>Загрузить базовый пакет</button>}
-                  />
-                ) : scenarioGroups.map((group) => (
-                  <details key={group.key} className="rounded-3xl border border-white/8 bg-white/[0.03] p-4" open={["core", "faq", "scheduling"].includes(group.key)}>
-                    <summary className="cursor-pointer list-none">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-semibold text-white">{group.label}</div>
-                          {group.description ? <div className="mt-1 text-xs leading-5 text-zinc-500">{group.description}</div> : null}
-                        </div>
-                        <span className="rounded-full border border-white/10 bg-black/25 px-2.5 py-1 text-xs text-zinc-300">{group.count}</span>
-                      </div>
-                    </summary>
-                    <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                      {group.cards.map((scenario) => (
-                        <ScenarioItem
-                          key={scenario.id}
-                          scenario={scenario}
-                          selected={selectedId === scenario.id}
-                          onSelect={setSelectedScenario}
-                          onActivate={activateScenario}
-                        />
-                      ))}
-                    </div>
-                  </details>
-                ))}
-              </div>
-            </Card>
-            <ManualScenarioCard
-              scenarioForm={scenarioForm}
-              setScenarioForm={setScenarioForm}
-              createScenario={createScenario}
-              busy={busy}
+  const insertText = (before, after = "") => {
+    setDocumentDraft((current) => ({ ...current, text: `${current.text}${current.text.endsWith("\n") || !current.text ? "" : "\n"}${before}${after}` }));
+  };
+
+  return (
+    <div className="min-h-[calc(100vh-120px)] overflow-hidden rounded-[32px] border border-white/10 bg-[#0b0c10] shadow-[0_30px_120px_rgba(0,0,0,0.35)]">
+      <div className="grid min-h-[calc(100vh-120px)] lg:grid-cols-[320px_minmax(0,1fr)] 2xl:grid-cols-[320px_minmax(0,1fr)_300px]">
+        <aside className="border-b border-white/10 bg-black/25 p-4 lg:border-b-0 lg:border-r">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-600">Dify</div>
+              <h1 className="mt-1 text-xl font-semibold tracking-tight text-white">База знаний</h1>
+            </div>
+            <ToolbarButton onClick={createNewDocument}>+</ToolbarButton>
+          </div>
+
+          <div className="mt-4">
+            <input
+              className={inputCls}
+              placeholder="Найти документ"
+              value={documentSearch}
+              onChange={(event) => setDocumentSearch(event.target.value)}
             />
           </div>
-          <ScenarioDetail scenario={selectedScenario} onActivate={activateScenario} onReplaySource={replaySource} />
-        </div>
-      );
-    }
 
-    if (activeTab === "sandbox") {
-      return (
-        <Card title="Песочница">
-          <div className="grid gap-5 lg:grid-cols-[360px_minmax(0,1fr)]">
-            <div className="space-y-3">
-              <input
-                className={inputCls}
-                placeholder="Номер переписки"
-                value={conversationId}
-                onChange={(e) => setConversationId(e.target.value)}
-              />
-              <select
-                className={inputCls}
-                value={sandboxEngine}
-                onChange={(e) => setSandboxEngine(e.target.value)}
-              >
-                <option value="local">Локальная эвристика</option>
-                <option value="n8n">n8n вебхук</option>
-              </select>
-              <textarea
-                className={`${inputCls} min-h-[140px] resize-y`}
-                placeholder="Временная замена инструкции, необязательно"
-                value={candidatePrompt}
-                onChange={(e) => setCandidatePrompt(e.target.value)}
-              />
-              <div className="flex flex-wrap gap-2">
-                <button className="btn-primary" disabled={!conversationId || busy === "sandbox"} onClick={runSandbox}>
-                  {busy === "sandbox" ? "Проверяю..." : "Проверить без отправки"}
-                </button>
-                <button className="btn-ghost" disabled={!conversationId || busy === "mine"} onClick={mineScenario}>
-                  {busy === "mine" ? "Извлекаю..." : "Создать старый сценарий"}
-                </button>
-              </div>
-            </div>
-            <JsonBlock data={sandboxResult} />
+          <div className="mt-4 flex items-center justify-between rounded-2xl border border-white/8 bg-white/[0.03] px-3 py-2 text-xs text-zinc-400">
+            <span>{documents.length} документов</span>
+            <button type="button" className="text-zinc-300 transition hover:text-white" onClick={loadAll}>
+              Обновить
+            </button>
           </div>
-        </Card>
-      );
-    }
 
-    if (activeTab === "runs") {
-      return (
-        <Card title="Журнал решений">
-          <SectionLabel title="Последние записи" description="Логи проверок и решений. Реальные ответы через Telegram здесь не отправляются." />
-          <div className="space-y-3">
-            {runs.length === 0 ? (
-              <EmptyState compact icon="Ж" title="Логов пока нет" description="Запусти проверку в песочнице, чтобы увидеть первую запись." />
-            ) : runs.map((run) => (
-              <details key={run.id} className="rounded-2xl border border-white/8 bg-black/20 p-4">
-                <summary className="cursor-pointer text-sm font-medium text-zinc-200">
-                  #{run.id} {run.run_type} · переписка {run.conversation_id || "нет"} · {run.status}
+          <div className="mt-4 max-h-[calc(100vh-360px)] space-y-3 overflow-auto pr-1">
+            {filteredGroups.length === 0 ? (
+              <EmptyState compact icon="Б" title="Пусто" description="Документы не найдены." />
+            ) : filteredGroups.map((group) => (
+              <details key={group.folder} open className="group">
+                <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-2 py-1.5 text-xs font-medium uppercase tracking-[0.16em] text-zinc-500 transition hover:bg-white/[0.04] hover:text-zinc-300">
+                  <span className="text-zinc-600 group-open:rotate-90">›</span>
+                  <span className="truncate">{group.folder}</span>
+                  <span className="ml-auto rounded-full bg-white/[0.06] px-2 py-0.5 text-[10px] text-zinc-500">{group.items.length}</span>
                 </summary>
-                <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                  <JsonBlock data={run.input} />
-                  <JsonBlock data={run.output} />
+                <div className="mt-1 space-y-1 pl-2">
+                  {group.items.map((document) => (
+                    <button
+                      key={document.id}
+                      type="button"
+                      onClick={() => setSelectedDocumentId(document.id)}
+                      className={`flex w-full items-start gap-2 rounded-2xl px-3 py-2.5 text-left transition ${
+                        selectedDocumentId === document.id
+                          ? "bg-sky-400/12 text-white"
+                          : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100"
+                      }`}
+                    >
+                      <span className="mt-0.5 text-sm text-zinc-500">□</span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium">{fileName(document.name)}</span>
+                        <span className="mt-0.5 block truncate text-xs text-zinc-600">{docStatusLabel(document.indexing_status)}</span>
+                      </span>
+                    </button>
+                  ))}
                 </div>
               </details>
             ))}
           </div>
-        </Card>
-      );
-    }
 
-    return (
-      <DifyConnectionCard
-        difyStatus={difyStatus}
-        difyResult={difyResult}
-        busy={busy}
-        syncDify={syncDify}
-        documentsCount={documents.length}
-      />
-    );
-  };
+          <ConnectionBox difyStatus={difyStatus} />
+        </aside>
 
-  return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow="База знаний"
-        title="База знаний"
-        description="Единый редактор документов Dify. Открыл документ, поправил текст, сохранил — база знаний обновилась без отдельного ручного копирования."
-        actions={
-          <div className="flex flex-wrap gap-2">
-            <button className="btn-ghost" onClick={() => loadDocuments(documentSearch)}>
-              Обновить документы
-            </button>
-            <button className="btn-primary" onClick={createNewDocument}>
-              Новый документ
-            </button>
-          </div>
-        }
-        stats={[
-          { label: "Документы", value: documents.length, tone: documents.length ? "blue" : "neutral", caption: difyStatus?.configured ? "Из Dify" : "Dify не подключен" },
-          { label: "Старые сценарии", value: scenarios.length, tone: scenarios.length ? "violet" : "neutral", caption: `${activeCount} активных / ${archivedCount} архивных` },
-          { label: "Записи", value: runs.length, tone: runs.length ? "blue" : "neutral", caption: "Журнал решений" },
-          { label: "Подключение", value: difyStatus?.configured ? "Dify" : "Нет", tone: difyStatus?.configured ? "emerald" : "amber", caption: difyStatus?.configured ? "Ключ задан" : "Нужны переменные" },
-        ]}
-      />
-
-      <div className="rounded-[28px] border border-white/10 bg-black/20 p-2">
-        <div className="grid gap-2 md:grid-cols-5">
-          {TABS.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={`rounded-2xl px-4 py-3 text-left transition ${
-                activeTab === tab.key ? "bg-white/10 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]" : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-200"
-              }`}
-            >
-              <div className="text-sm font-semibold">{tab.label}</div>
-              <div className="mt-1 text-xs opacity-70">{tab.hint}</div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {renderTab()}
-    </div>
-  );
-}
-
-function KnowledgeDocumentsWorkspace({
-  difyStatus,
-  documents,
-  documentGroups,
-  selectedDocument,
-  selectedDocumentId,
-  documentDetail,
-  documentDraft,
-  setDocumentDraft,
-  setSelectedDocumentId,
-  documentSearch,
-  setDocumentSearch,
-  documentError,
-  documentLoading,
-  documentResult,
-  hasDocumentChanges,
-  busy,
-  createNewDocument,
-  saveDocument,
-  reloadDocuments,
-}) {
-  const configured = Boolean(difyStatus?.configured);
-  const segmentCount = documentDetail?.segments?.length || selectedDocument?.segment_count || 0;
-
-  return (
-    <div className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
-      <div className="space-y-5">
-        <Card
-          title="Документы"
-          action={<button className="btn-primary text-sm" onClick={createNewDocument}>Новый</button>}
-        >
-          <div className={`mb-4 rounded-3xl border p-4 ${configured ? "border-emerald-400/15 bg-emerald-400/10" : "border-amber-400/15 bg-amber-400/10"}`}>
-            <div className={`text-sm font-medium ${configured ? "text-emerald-100" : "text-amber-100"}`}>
-              {configured ? "Dify подключен" : "Dify не подключен"}
+        <main className="min-w-0 bg-[radial-gradient(circle_at_top_right,rgba(14,165,233,0.08),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.025),transparent)]">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-3">
+            <div className="min-w-0">
+              <div className="truncate text-xs text-zinc-500">
+                {selectedDocument ? `${documentFolder(selectedDocument)} / ${fileName(selectedDocument.name)}` : "Новый документ"}
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                {hasChanges ? <Badge className="border-amber-400/20 bg-amber-400/10 text-amber-200">не сохранено</Badge> : <Badge className="border-white/10 bg-white/5 text-zinc-400">сохранено</Badge>}
+                {selectedDocument ? <Badge className={docStatusTone(selectedDocument.indexing_status)}>{docStatusLabel(selectedDocument.indexing_status)}</Badge> : <Badge className="border-sky-400/20 bg-sky-400/10 text-sky-200">новый</Badge>}
+                {busy === "detail" ? <Badge className="border-sky-400/20 bg-sky-400/10 text-sky-200">загрузка</Badge> : null}
+              </div>
             </div>
-            <div className={`mt-2 text-sm leading-6 ${configured ? "text-emerald-100/70" : "text-amber-100/70"}`}>
-              {configured
-                ? "Список ниже читается из подключенной базы знаний. Сохранение в редакторе сразу обновляет документ в Dify."
-                : "Нужно задать DIFY_API_BASE_URL, DIFY_API_KEY и DIFY_DATASET_ID на сервере."}
+            <div className="flex flex-wrap items-center gap-2">
+              <ToolbarButton onClick={() => setMode(mode === "edit" ? "preview" : "edit")}>
+                {mode === "edit" ? "Предпросмотр" : "Редактор"}
+              </ToolbarButton>
+              <ToolbarButton onClick={deleteDocument} disabled={!selectedDocumentId || busy === "delete"} danger>
+                Удалить
+              </ToolbarButton>
+              <button
+                type="button"
+                onClick={saveDocument}
+                disabled={busy === "save" || !documentDraft.name.trim() || !documentDraft.text.trim()}
+                className="rounded-2xl bg-sky-400 px-4 py-2 text-sm font-semibold text-white shadow-[0_14px_35px_rgba(56,189,248,0.28)] transition hover:bg-sky-300 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {busy === "save" ? "Сохраняю..." : "Сохранить"}
+              </button>
             </div>
           </div>
 
-          <div className="mb-4 flex gap-2">
+          <div className="px-5 py-5">
             <input
-              className={inputCls}
-              placeholder="Поиск по документам"
-              value={documentSearch}
-              onChange={(e) => setDocumentSearch(e.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") reloadDocuments();
-              }}
+              className="w-full border-none bg-transparent text-3xl font-semibold tracking-tight text-white outline-none placeholder-zinc-700"
+              placeholder="Название документа"
+              value={documentDraft.name}
+              onChange={(event) => setDocumentDraft({ ...documentDraft, name: event.target.value })}
             />
-            <button className="btn-ghost shrink-0 text-sm" onClick={reloadDocuments}>Найти</button>
-          </div>
 
-          {documentError ? (
-            <div className="mb-4 rounded-2xl border border-rose-400/20 bg-rose-400/10 p-3 text-sm leading-6 text-rose-100">
-              {documentError}
+            <div className="mt-4 flex flex-wrap gap-2">
+              <ToolbarButton onClick={() => insertText("\n# Заголовок\n")}>H1</ToolbarButton>
+              <ToolbarButton onClick={() => insertText("\n## Раздел\n")}>H2</ToolbarButton>
+              <ToolbarButton onClick={() => insertText("\n- Пункт списка\n")}>Список</ToolbarButton>
+              <ToolbarButton onClick={() => insertText("\n> Заметка\n")}>Заметка</ToolbarButton>
             </div>
-          ) : null}
 
-          {documents.length === 0 ? (
-            <EmptyState compact icon="Б" title="Документы не найдены" description="Если Dify подключен, нажми «Новый» и создай первый документ прямо здесь." />
-          ) : (
-            <div className="max-h-[680px] space-y-3 overflow-auto pr-1">
-              {documentGroups.map((group) => (
-                <details key={group.folder} open className="rounded-3xl border border-white/8 bg-white/[0.03] p-3">
-                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-1 py-1">
-                    <span className="text-sm font-semibold text-white">{group.folder}</span>
-                    <span className="rounded-full border border-white/10 bg-black/25 px-2.5 py-1 text-xs text-zinc-300">{group.items.length}</span>
-                  </summary>
-                  <div className="mt-2 space-y-2">
-                    {group.items.map((document) => (
-                      <button
-                        key={document.id}
-                        type="button"
-                        onClick={() => setSelectedDocumentId(document.id)}
-                        className={`w-full rounded-2xl border p-3 text-left transition ${
-                          selectedDocumentId === document.id
-                            ? "border-sky-400/35 bg-sky-400/10"
-                            : "border-white/8 bg-black/20 hover:border-white/16 hover:bg-white/[0.04]"
-                        }`}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="truncate text-sm font-medium text-zinc-100">{document.name}</div>
-                            <div className="mt-1 truncate text-xs text-zinc-500">{document.id}</div>
-                          </div>
-                          <Badge className={docStatusTone(document.indexing_status)}>{docStatusLabel(document.indexing_status)}</Badge>
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-zinc-500">
-                          <span>{document.word_count || 0} слов</span>
-                          <span>{document.segment_count || 0} сегм.</span>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </details>
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
+            {documentError ? (
+              <div className="mt-4 rounded-2xl border border-rose-400/20 bg-rose-400/10 p-3 text-sm leading-6 text-rose-100">
+                {documentError}
+              </div>
+            ) : null}
+            {documentMessage ? (
+              <div className="mt-4 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-3 text-sm leading-6 text-emerald-100">
+                {documentMessage}
+              </div>
+            ) : null}
 
-      <Surface className="min-h-[760px] p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">Редактор документа</div>
-            <h2 className="mt-3 text-2xl font-semibold leading-tight text-white">
-              {documentDraft.name || selectedDocument?.name || "Новый документ"}
-            </h2>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-500">
-              Это прямой редактор базы знаний. После сохранения текст отправляется в Dify, отдельная вкладка синхронизации для этого не нужна.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {hasDocumentChanges ? <Badge className="border-amber-400/20 bg-amber-400/10 text-amber-200">есть изменения</Badge> : null}
-            {documentLoading ? <Badge className="border-sky-400/20 bg-sky-400/10 text-sky-200">загрузка</Badge> : null}
-            <button
-              className="btn-primary"
-              disabled={busy === "document-save" || !documentDraft.name.trim() || !documentDraft.text.trim()}
-              onClick={saveDocument}
-            >
-              {busy === "document-save" ? "Сохраняю..." : "Сохранить в Dify"}
-            </button>
-          </div>
-        </div>
-
-        <div className="mt-5 grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_180px]">
-          <input
-            className={inputCls}
-            placeholder="Название документа"
-            value={documentDraft.name}
-            onChange={(e) => setDocumentDraft({ ...documentDraft, name: e.target.value })}
-          />
-          <InfoPill label="Сегменты" value={segmentCount || "нет"} />
-          <InfoPill label="Статус" value={docStatusLabel(selectedDocument?.indexing_status)} />
-        </div>
-
-        <textarea
-          className={`${inputCls} mt-4 min-h-[560px] resize-y font-mono text-[13px] leading-6`}
-          placeholder="Текст документа"
-          value={documentDraft.text}
-          onChange={(e) => setDocumentDraft({ ...documentDraft, text: e.target.value })}
-        />
-
-        {documentResult ? (
-          <div className="mt-4 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-3 text-sm leading-6 text-emerald-100">
-            Документ сохранен в Dify. ID: {documentResult.document_id || selectedDocumentId || "не указан"}
-          </div>
-        ) : null}
-
-        {documentDetail?.segments?.length ? (
-          <details className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
-            <summary className="cursor-pointer text-sm font-medium text-zinc-200">Посмотреть сегменты Dify</summary>
-            <div className="mt-3 space-y-3">
-              {documentDetail.segments.map((segment) => (
-                <div key={segment.id || segment.position} className="rounded-2xl border border-white/8 bg-white/[0.03] p-3">
-                  <div className="mb-2 flex items-center justify-between gap-2 text-xs text-zinc-500">
-                    <span>Сегмент {segment.position || segment.id}</span>
-                    <span>{segment.word_count || 0} слов</span>
-                  </div>
-                  <div className="whitespace-pre-wrap text-sm leading-6 text-zinc-300">{segment.content}</div>
+            <div className="mt-4 overflow-hidden rounded-[28px] border border-white/10 bg-black/20">
+              {mode === "edit" ? (
+                <textarea
+                  className="min-h-[calc(100vh-390px)] w-full resize-y border-none bg-transparent p-8 font-mono text-[13px] leading-7 text-zinc-200 outline-none placeholder-zinc-700"
+                  placeholder="Пиши здесь содержимое базы знаний"
+                  value={documentDraft.text}
+                  onChange={(event) => setDocumentDraft({ ...documentDraft, text: event.target.value })}
+                />
+              ) : (
+                <div className="min-h-[calc(100vh-390px)]">
+                  <MarkdownPreview text={documentDraft.text} />
                 </div>
-              ))}
+              )}
             </div>
-          </details>
-        ) : null}
-      </Surface>
-    </div>
-  );
-}
+          </div>
+        </main>
 
-function InfoPill({ label, value }) {
-  return (
-    <div className="rounded-2xl border border-white/8 bg-black/20 px-3 py-2 text-xs">
-      <div className="text-zinc-500">{label}</div>
-      <div className="mt-1 truncate text-sm text-zinc-200">{value}</div>
-    </div>
-  );
-}
+        <aside className="hidden border-l border-white/10 bg-black/20 p-4 2xl:block">
+          <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-600">Свойства</div>
+          <div className="mt-4 space-y-3">
+            <Property label="ID" value={selectedDocument?.id || "новый документ"} />
+            <Property label="Папка" value={selectedDocument ? documentFolder(selectedDocument) : "Корень"} />
+            <Property label="Статус" value={docStatusLabel(selectedDocument?.indexing_status)} />
+            <Property label="Сегменты" value={documentDetail?.segments?.length || selectedDocument?.segment_count || 0} />
+            <Property label="Слова" value={selectedDocument?.word_count || 0} />
+            <Property label="Обновлен" value={formatDate(selectedDocument?.updated_at)} />
+          </div>
 
-function ManualScenarioCard({ scenarioForm, setScenarioForm, createScenario, busy }) {
-  return (
-    <Card title="Ручной старый сценарий">
-      <SectionLabel
-        title="Не основной путь"
-        description="Этот блок оставлен для совместимости. Для новой базы лучше создавать документы Dify во вкладке «Документы»."
-      />
-      <div className="grid gap-3 lg:grid-cols-2">
-        <input className={inputCls} placeholder="Название" value={scenarioForm.title} onChange={(e) => setScenarioForm({ ...scenarioForm, title: e.target.value })} />
-        <select className={inputCls} value={scenarioForm.intent} onChange={(e) => setScenarioForm({ ...scenarioForm, intent: e.target.value })}>
-          <option value="context_question">Уточнение контекста</option>
-          <option value="sales_objection">Возражение: продажа</option>
-          <option value="book_meeting">Назначить встречу</option>
-          <option value="closing_not_interested">Вежливо завершить</option>
-        </select>
-        <textarea className={`${inputCls} min-h-[90px]`} placeholder="Когда применять" value={scenarioForm.trigger_summary} onChange={(e) => setScenarioForm({ ...scenarioForm, trigger_summary: e.target.value })} />
-        <textarea className={`${inputCls} min-h-[90px]`} placeholder="Как отвечать" value={scenarioForm.recommended_reply} onChange={(e) => setScenarioForm({ ...scenarioForm, recommended_reply: e.target.value })} />
-        <input className={inputCls} placeholder="Служебные метки, необязательно" value={scenarioForm.tags} onChange={(e) => setScenarioForm({ ...scenarioForm, tags: e.target.value })} />
-        <button className="btn-primary" disabled={!scenarioForm.title || !scenarioForm.trigger_summary || !scenarioForm.recommended_reply || busy === "create"} onClick={createScenario}>
-          Сохранить черновик
-        </button>
+          <div className="mt-6 rounded-3xl border border-white/8 bg-white/[0.03] p-4">
+            <div className="text-sm font-semibold text-white">Как теперь работать</div>
+            <div className="mt-2 space-y-2 text-sm leading-6 text-zinc-400">
+              <p>Название документа редактируется прямо сверху.</p>
+              <p>Сохранение обновляет документ в Dify.</p>
+              <p>Удаление удаляет документ из подключенной базы.</p>
+            </div>
+          </div>
+
+          {documentDetail?.segments?.length ? (
+            <details className="mt-4 rounded-3xl border border-white/8 bg-white/[0.03] p-4">
+              <summary className="cursor-pointer text-sm font-semibold text-zinc-200">Сегменты Dify</summary>
+              <div className="mt-3 max-h-[360px] space-y-3 overflow-auto">
+                {documentDetail.segments.map((segment) => (
+                  <div key={segment.id || segment.position} className="rounded-2xl border border-white/8 bg-black/25 p-3">
+                    <div className="mb-2 text-xs text-zinc-600">Сегмент {segment.position || segment.id}</div>
+                    <div className="line-clamp-4 text-xs leading-5 text-zinc-400">{segment.content}</div>
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : null}
+        </aside>
       </div>
-    </Card>
+    </div>
   );
 }
 
-function DifyConnectionCard({ difyStatus, difyResult, busy, syncDify, documentsCount }) {
+function ConnectionBox({ difyStatus }) {
   const configured = Boolean(difyStatus?.configured);
   return (
-    <Card
-      title="Подключение к Dify"
-      action={
-        <button className="btn-primary" onClick={syncDify} disabled={!configured || busy === "dify-sync"}>
-          {busy === "dify-sync" ? "Отправляю..." : "Синхронизировать старые сценарии"}
-        </button>
-      }
-    >
-      <div className={`rounded-3xl border p-4 ${configured ? "border-emerald-400/15 bg-emerald-400/10" : "border-amber-400/15 bg-amber-400/10"}`}>
-        <div className={`text-sm font-medium ${configured ? "text-emerald-100" : "text-amber-100"}`}>
-          {configured ? "Dify настроен" : "Dify не настроен"}
-        </div>
-        <div className={`mt-2 text-sm leading-6 ${configured ? "text-emerald-100/70" : "text-amber-100/70"}`}>
-          {configured
-            ? "Редактор документов работает напрямую с Dify. Кнопка справа нужна только для переноса старых сценариев."
-            : "Нужно указать DIFY_API_BASE_URL, DIFY_API_KEY и DIFY_DATASET_ID в окружении серверной части."}
-        </div>
-        {difyStatus ? (
-          <div className="mt-3 grid gap-2 text-xs text-zinc-400 sm:grid-cols-4">
-            <div className="rounded-2xl border border-white/8 bg-black/20 p-3">
-              <div className="text-zinc-500">Адрес API</div>
-              <div className="mt-1 truncate text-zinc-200">{difyStatus.api_base_url || "не задан"}</div>
-            </div>
-            <div className="rounded-2xl border border-white/8 bg-black/20 p-3">
-              <div className="text-zinc-500">База Dify</div>
-              <div className="mt-1 truncate text-zinc-200">{difyStatus.dataset_id || "не задана"}</div>
-            </div>
-            <div className="rounded-2xl border border-white/8 bg-black/20 p-3">
-              <div className="text-zinc-500">Ключ API</div>
-              <div className="mt-1 text-zinc-200">{difyStatus.has_api_key ? "задан" : "не задан"}</div>
-            </div>
-            <div className="rounded-2xl border border-white/8 bg-black/20 p-3">
-              <div className="text-zinc-500">Документы</div>
-              <div className="mt-1 text-zinc-200">{documentsCount}</div>
-            </div>
-          </div>
-        ) : null}
+    <div className={`mt-4 rounded-3xl border p-4 ${configured ? "border-emerald-400/15 bg-emerald-400/10" : "border-amber-400/15 bg-amber-400/10"}`}>
+      <div className={`text-sm font-medium ${configured ? "text-emerald-100" : "text-amber-100"}`}>
+        {configured ? "Dify подключен" : "Dify не подключен"}
       </div>
-      {difyResult ? (
-        <div className="mt-4 grid gap-3 sm:grid-cols-4">
-          <Metric label="Всего" value={difyResult.total} />
-          <Metric label="Создано" value={difyResult.created} tone="emerald" />
-          <Metric label="Обновлено" value={difyResult.updated} tone="sky" />
-          <Metric label="Ошибки" value={difyResult.failed} tone={difyResult.failed ? "rose" : "zinc"} />
-        </div>
-      ) : null}
-    </Card>
+      <div className={`mt-2 text-xs leading-5 ${configured ? "text-emerald-100/65" : "text-amber-100/70"}`}>
+        {configured ? "Документы читаются и сохраняются напрямую." : "Нужны переменные Dify на сервере."}
+      </div>
+      <div className="mt-3 space-y-2 text-[11px] text-zinc-500">
+        <div className="truncate">API: {difyStatus?.api_base_url || "нет"}</div>
+        <div className="truncate">База: {difyStatus?.dataset_id || "нет"}</div>
+        <div>Ключ: {difyStatus?.has_api_key ? "задан" : "нет"}</div>
+      </div>
+    </div>
   );
 }
 
-function Metric({ label, value, tone = "zinc" }) {
-  const tones = {
-    zinc: "border-white/8 bg-white/4 text-zinc-200",
-    emerald: "border-emerald-400/20 bg-emerald-400/10 text-emerald-100",
-    rose: "border-rose-400/20 bg-rose-400/10 text-rose-100",
-    sky: "border-sky-400/20 bg-sky-400/10 text-sky-100",
-  };
+function Property({ label, value }) {
   return (
-    <div className={`rounded-2xl border p-3 text-sm ${tones[tone] || tones.zinc}`}>
-      {label} <span className="float-right text-white">{value}</span>
+    <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-3 py-2">
+      <div className="text-[11px] uppercase tracking-[0.16em] text-zinc-600">{label}</div>
+      <div className="mt-1 truncate text-sm text-zinc-200">{value}</div>
     </div>
   );
 }

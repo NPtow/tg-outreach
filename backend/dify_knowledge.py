@@ -92,6 +92,9 @@ class DifyKnowledgeClient:
             params={"page": page, "limit": limit},
         )
 
+    def delete_document(self, *, document_id: str) -> dict:
+        return self._delete(f"/datasets/{self.config.dataset_id}/documents/{document_id}")
+
     def _document_payload(self, *, name: str, text: str, include_indexing: bool = True) -> dict:
         payload = {
             "name": name,
@@ -128,6 +131,18 @@ class DifyKnowledgeClient:
             with httpx.Client(timeout=self.config.timeout_s) as client:
                 response = client.get(url, headers=self._headers(), params=params)
                 response.raise_for_status()
+                return response.json()
+        except Exception as exc:
+            raise DifyKnowledgeError(str(exc)) from exc
+
+    def _delete(self, path: str) -> dict:
+        url = f"{self.config.api_base_url}{path}"
+        try:
+            with httpx.Client(timeout=self.config.timeout_s) as client:
+                response = client.delete(url, headers=self._headers())
+                response.raise_for_status()
+                if not response.content:
+                    return {"ok": True}
                 return response.json()
         except Exception as exc:
             raise DifyKnowledgeError(str(exc)) from exc

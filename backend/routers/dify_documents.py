@@ -86,6 +86,15 @@ def update_dify_document(document_id: str, data: DifyDocumentWrite):
     return {"ok": True, "document_id": _extract_response_document_id(response) or document_id, "raw": response}
 
 
+@router.delete("/documents/{document_id}")
+def delete_dify_document(document_id: str):
+    try:
+        response = DifyKnowledgeClient().delete_document(document_id=document_id)
+    except DifyKnowledgeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "document_id": document_id, "raw": response}
+
+
 def _clean_document_payload(data: DifyDocumentWrite) -> tuple[str, str]:
     name = data.name.strip()
     text = data.text.strip()

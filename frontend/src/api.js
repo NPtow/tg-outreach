@@ -122,6 +122,7 @@ export const api = {
   getDifyDocument: (id) => req("GET", `/api/dify/documents/${id}`),
   createDifyDocument: (data) => req("POST", "/api/dify/documents", data),
   updateDifyDocument: (id, data) => req("PUT", `/api/dify/documents/${id}`, data),
+  deleteDifyDocument: (id) => req("DELETE", `/api/dify/documents/${id}`),
   syncDifyScenarios: (status = "active") => req("POST", `/api/scenarios/dify/sync?status=${status}`),
   legacyFounderResearchPack: () => req("POST", "/api/scenarios/legacy/founder-research-pack"),
   createScenario: (data) => req("POST", "/api/scenarios/", data),
