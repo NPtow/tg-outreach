@@ -77,6 +77,21 @@ class DifyKnowledgeClient:
             payload,
         )
 
+    def list_documents(self, *, page: int = 1, limit: int = 100, keyword: str | None = None) -> dict:
+        params: dict[str, str | int] = {"page": page, "limit": limit}
+        if keyword:
+            params["keyword"] = keyword
+        return self._get(f"/datasets/{self.config.dataset_id}/documents", params=params)
+
+    def get_document(self, *, document_id: str) -> dict:
+        return self._get(f"/datasets/{self.config.dataset_id}/documents/{document_id}")
+
+    def list_document_segments(self, *, document_id: str, page: int = 1, limit: int = 100) -> dict:
+        return self._get(
+            f"/datasets/{self.config.dataset_id}/documents/{document_id}/segments",
+            params={"page": page, "limit": limit},
+        )
+
     def _document_payload(self, *, name: str, text: str, include_indexing: bool = True) -> dict:
         payload = {
             "name": name,
@@ -90,16 +105,12 @@ class DifyKnowledgeClient:
         return payload
 
     def _post_with_aliases(self, paths: list[str], payload: dict) -> dict:
-        headers = {
-            "Authorization": f"Bearer {self.config.api_key}",
-            "Content-Type": "application/json",
-        }
         last_error: Exception | None = None
         with httpx.Client(timeout=self.config.timeout_s) as client:
             for path in paths:
                 url = f"{self.config.api_base_url}{path}"
                 try:
-                    response = client.post(url, headers=headers, json=payload)
+                    response = client.post(url, headers=self._headers(), json=payload)
                     if response.status_code == 404 and path != paths[-1]:
                         last_error = DifyKnowledgeError(f"Dify endpoint not found: {path}")
                         continue
@@ -110,6 +121,22 @@ class DifyKnowledgeClient:
                     if path == paths[-1]:
                         break
         raise DifyKnowledgeError(str(last_error))
+
+    def _get(self, path: str, *, params: dict | None = None) -> dict:
+        url = f"{self.config.api_base_url}{path}"
+        try:
+            with httpx.Client(timeout=self.config.timeout_s) as client:
+                response = client.get(url, headers=self._headers(), params=params)
+                response.raise_for_status()
+                return response.json()
+        except Exception as exc:
+            raise DifyKnowledgeError(str(exc)) from exc
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
 
 
 def build_scenario_dify_document(card: ScenarioCard) -> dict:

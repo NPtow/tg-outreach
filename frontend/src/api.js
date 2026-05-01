@@ -112,6 +112,16 @@ export const api = {
     return req("POST", withProject(path, projectId));
   },
   getDifyStatus: () => req("GET", "/api/scenarios/dify/status"),
+  getDifyConnectionStatus: () => req("GET", "/api/dify/status"),
+  getDifyDocuments: (params = {}) => {
+    const q = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v !== undefined && v !== "" && v !== null)
+    ).toString();
+    return req("GET", `/api/dify/documents${q ? "?" + q : ""}`);
+  },
+  getDifyDocument: (id) => req("GET", `/api/dify/documents/${id}`),
+  createDifyDocument: (data) => req("POST", "/api/dify/documents", data),
+  updateDifyDocument: (id, data) => req("PUT", `/api/dify/documents/${id}`, data),
   syncDifyScenarios: (status = "active") => req("POST", `/api/scenarios/dify/sync?status=${status}`),
   legacyFounderResearchPack: () => req("POST", "/api/scenarios/legacy/founder-research-pack"),
   createScenario: (data) => req("POST", "/api/scenarios/", data),

@@ -14,7 +14,7 @@ from backend.database import init_db
 from backend.event_bus import get_latest_runtime_event_id, get_runtime_events, publish_runtime_event
 from backend.routers import accounts, bookings, conversations, settings, campaigns, prompts, dnc, contacts, integrations, internal_runtime
 from backend.routers import agent_pipelines
-from backend.routers import agents, evals, sandbox, scenarios
+from backend.routers import agents, dify_documents, evals, sandbox, scenarios
 from backend.routers import projects
 from backend.routers import proxy_pool
 from backend.runtime_config import cors_allowed_origins, owns_telegram_runtime, runtime_role
@@ -92,6 +92,7 @@ app.include_router(integrations.router)
 app.include_router(internal_runtime.router)
 app.include_router(proxy_pool.router)
 app.include_router(agents.router)
+app.include_router(dify_documents.router)
 app.include_router(scenarios.router)
 app.include_router(sandbox.router)
 app.include_router(evals.router)
