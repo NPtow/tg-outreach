@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from backend.models import Integration
 from backend.security import decrypt_value, encrypt_value
+from backend.settings_secrets import settings_secret, settings_value
 from backend.zoom_meetings import create_zoom_meeting, zoom_configured
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -32,15 +33,19 @@ TEST_MEETING_DESCRIPTION = "Тестовая встреча, созданная 
 
 
 def google_redirect_uri() -> str:
-    return (os.getenv("GOOGLE_REDIRECT_URI") or "http://127.0.0.1:8010/api/integrations/google/callback").strip()
+    return settings_value(
+        "google_redirect_uri",
+        "GOOGLE_REDIRECT_URI",
+        "http://127.0.0.1:8010/api/integrations/google/callback",
+    )
 
 
 def _google_client_id() -> str:
-    return (os.getenv("GOOGLE_CLIENT_ID") or "").strip()
+    return settings_value("google_client_id", "GOOGLE_CLIENT_ID")
 
 
 def _google_client_secret() -> str:
-    return (os.getenv("GOOGLE_CLIENT_SECRET") or "").strip()
+    return settings_secret("google_client_secret", "GOOGLE_CLIENT_SECRET")
 
 
 def google_configured() -> bool:
@@ -48,7 +53,7 @@ def google_configured() -> bool:
 
 
 def _state_secret() -> str:
-    return (os.getenv("GOOGLE_OAUTH_STATE_SECRET") or _google_client_secret() or "local-dev-state").strip()
+    return settings_secret("google_oauth_state_secret", "GOOGLE_OAUTH_STATE_SECRET", _google_client_secret() or "local-dev-state")
 
 
 def make_oauth_state(now: Optional[int] = None) -> str:
@@ -116,7 +121,7 @@ async def exchange_google_code(db: Session, code: str) -> Integration:
     integration.token_type = payload.get("token_type") or "Bearer"
     integration.scope = payload.get("scope") or " ".join(GOOGLE_SCOPES)
     integration.expires_at = _parse_expiry(payload.get("expires_in"))
-    integration.account_email = os.getenv("GOOGLE_CALENDAR_EMAIL") or os.getenv("NOTIFY_TO") or ""
+    integration.account_email = settings_value("google_calendar_email", "GOOGLE_CALENDAR_EMAIL", os.getenv("NOTIFY_TO") or "")
     integration.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(integration)

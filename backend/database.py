@@ -91,6 +91,15 @@ def init_db():
         ("settings", "provider TEXT DEFAULT 'openai'"),
         ("settings", "anthropic_key TEXT DEFAULT ''"),
         ("settings", "base_url TEXT DEFAULT ''"),
+        ("settings", "google_client_id TEXT DEFAULT ''"),
+        ("settings", "google_client_secret TEXT DEFAULT ''"),
+        ("settings", "google_redirect_uri TEXT DEFAULT ''"),
+        ("settings", "google_oauth_state_secret TEXT DEFAULT ''"),
+        ("settings", "google_calendar_email TEXT DEFAULT ''"),
+        ("settings", "zoom_account_id TEXT DEFAULT ''"),
+        ("settings", "zoom_client_id TEXT DEFAULT ''"),
+        ("settings", "zoom_client_secret TEXT DEFAULT ''"),
+        ("settings", "zoom_host_email TEXT DEFAULT ''"),
         # device fingerprint fields on accounts
         ("accounts", "device_model TEXT"),
         ("accounts", "system_version TEXT"),
@@ -167,6 +176,15 @@ def init_db():
             ("accounts", "proxy_pass"),
             ("settings", "openai_key"),
             ("settings", "anthropic_key"),
+            ("settings", "google_client_id"),
+            ("settings", "google_client_secret"),
+            ("settings", "google_redirect_uri"),
+            ("settings", "google_oauth_state_secret"),
+            ("settings", "google_calendar_email"),
+            ("settings", "zoom_account_id"),
+            ("settings", "zoom_client_id"),
+            ("settings", "zoom_client_secret"),
+            ("settings", "zoom_host_email"),
         ]
         with engine.connect() as conn:
             for table, col in text_cols:

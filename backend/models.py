@@ -372,6 +372,15 @@ class Settings(Base):
     system_prompt = Column(Text, default="Ты вежливый менеджер по продажам. Отвечай кратко и по делу.")
     auto_reply_enabled = Column(Boolean, default=True)
     context_messages = Column(Integer, default=10)
+    google_client_id = Column(Text, default="")
+    google_client_secret = Column(Text, default="")
+    google_redirect_uri = Column(Text, default="")
+    google_oauth_state_secret = Column(Text, default="")
+    google_calendar_email = Column(Text, default="")
+    zoom_account_id = Column(Text, default="")
+    zoom_client_id = Column(Text, default="")
+    zoom_client_secret = Column(Text, default="")
+    zoom_host_email = Column(Text, default="")
 
 
 class RuntimeEvent(Base):

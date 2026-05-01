@@ -55,7 +55,7 @@ function SecretField({ label, placeholder, value, onChange, configured, onClear,
   return (
     <Field label={label} hint={hint}>
       <div className="space-y-2">
-        <input type="password" className={inputCls} placeholder={configured ? "Configured" : placeholder} value={value}
+        <input type="password" className={inputCls} placeholder={configured ? "Задан" : placeholder} value={value}
           onChange={onChange} />
         <div className="flex items-center gap-3">
           <span className={`text-xs ${configured ? "text-emerald-400" : "text-zinc-500"}`}>
@@ -77,10 +77,25 @@ export default function Settings() {
     provider: "openai",
     openai_key: "",
     anthropic_key: "",
+    google_client_id: "",
+    google_client_secret: "",
+    google_redirect_uri: "",
+    google_oauth_state_secret: "",
+    google_calendar_email: "",
+    zoom_account_id: "",
+    zoom_client_id: "",
+    zoom_client_secret: "",
+    zoom_host_email: "",
     openai_key_configured: false,
     anthropic_key_configured: false,
+    google_client_secret_configured: false,
+    google_oauth_state_secret_configured: false,
+    zoom_client_secret_configured: false,
     clear_openai_key: false,
     clear_anthropic_key: false,
+    clear_google_client_secret: false,
+    clear_google_oauth_state_secret: false,
+    clear_zoom_client_secret: false,
     base_url: "",
     model: "gpt-4o-mini",
     system_prompt: "Ты вежливый менеджер по продажам. Отвечай кратко и по делу.",
@@ -98,9 +113,28 @@ export default function Settings() {
   const handleSave = async () => {
     await api.saveSettings(form);
     const fresh = await api.getSettings();
-    setForm((f) => ({ ...f, ...fresh, openai_key: "", anthropic_key: "", clear_openai_key: false, clear_anthropic_key: false }));
+    setForm((f) => ({
+      ...f,
+      ...fresh,
+      openai_key: "",
+      anthropic_key: "",
+      google_client_secret: "",
+      google_oauth_state_secret: "",
+      zoom_client_secret: "",
+      clear_openai_key: false,
+      clear_anthropic_key: false,
+      clear_google_client_secret: false,
+      clear_google_oauth_state_secret: false,
+      clear_zoom_client_secret: false,
+    }));
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
+  };
+
+  const handleGoogleConnect = async () => {
+    await api.saveSettings(form);
+    const result = await api.getGoogleAuthUrl();
+    if (result?.url) window.open(result.url, "_blank", "noopener,noreferrer");
   };
 
   const isLocal = form.provider === "ollama" || form.provider === "lmstudio";
@@ -112,10 +146,84 @@ export default function Settings() {
   return (
     <div className="max-w-3xl space-y-4">
       <PageHeader
-        eyebrow="Control Plane"
-        title="Settings"
-        description="Настройки AI-провайдера, fallback промпта и глобального auto-reply поведения."
+        eyebrow="Панель управления"
+        title="Настройки"
+        description="Ключи, интеграции, AI-провайдер и глобальное поведение автоответов."
       />
+
+      <Section title="Ключи">
+        <div className="rounded-3xl border border-white/8 bg-black/20 p-4">
+          <div className="text-sm font-semibold text-white">Google Calendar</div>
+          <p className="mt-1 text-xs leading-5 text-zinc-500">
+            Эти значения используются для OAuth-подключения календаря и создания встреч. Секреты не возвращаются из backend в браузер.
+          </p>
+          <div className="mt-4 grid gap-4 lg:grid-cols-2">
+            <Field label="Google Client ID">
+              <input className={inputCls} placeholder="...apps.googleusercontent.com" value={form.google_client_id}
+                onChange={(e) => set("google_client_id", e.target.value)} />
+            </Field>
+            <SecretField
+              label="Google Client Secret"
+              placeholder="GOCSPX-..."
+              value={form.google_client_secret}
+              configured={form.google_client_secret_configured && !form.clear_google_client_secret}
+              onChange={(e) => setForm((f) => ({ ...f, google_client_secret: e.target.value, clear_google_client_secret: false }))}
+              onClear={() => setForm((f) => ({ ...f, google_client_secret: "", clear_google_client_secret: true, google_client_secret_configured: false }))}
+            />
+            <Field label="Redirect URI" hint="Должен совпадать с Authorized redirect URI в Google Cloud">
+              <input className={inputCls} placeholder="https://.../api/integrations/google/callback" value={form.google_redirect_uri}
+                onChange={(e) => set("google_redirect_uri", e.target.value)} />
+            </Field>
+            <SecretField
+              label="OAuth State Secret"
+              hint="Необязательно. Если пусто, используется Google Client Secret."
+              placeholder="случайная строка"
+              value={form.google_oauth_state_secret}
+              configured={form.google_oauth_state_secret_configured && !form.clear_google_oauth_state_secret}
+              onChange={(e) => setForm((f) => ({ ...f, google_oauth_state_secret: e.target.value, clear_google_oauth_state_secret: false }))}
+              onClear={() => setForm((f) => ({ ...f, google_oauth_state_secret: "", clear_google_oauth_state_secret: true, google_oauth_state_secret_configured: false }))}
+            />
+            <Field label="Calendar email" hint="Почта календаря для статуса подключения">
+              <input className={inputCls} placeholder="name@gmail.com" value={form.google_calendar_email}
+                onChange={(e) => set("google_calendar_email", e.target.value)} />
+            </Field>
+            <div className="flex items-end">
+              <button type="button" className="btn-ghost w-full text-center" onClick={handleGoogleConnect}>
+                Сохранить и подключить Google Calendar
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-3xl border border-white/8 bg-black/20 p-4">
+          <div className="text-sm font-semibold text-white">Zoom</div>
+          <p className="mt-1 text-xs leading-5 text-zinc-500">
+            Используется Server-to-Server OAuth для создания Zoom-ссылок при бронировании встречи.
+          </p>
+          <div className="mt-4 grid gap-4 lg:grid-cols-2">
+            <Field label="Zoom Account ID">
+              <input className={inputCls} placeholder="account id" value={form.zoom_account_id}
+                onChange={(e) => set("zoom_account_id", e.target.value)} />
+            </Field>
+            <Field label="Zoom Client ID">
+              <input className={inputCls} placeholder="client id" value={form.zoom_client_id}
+                onChange={(e) => set("zoom_client_id", e.target.value)} />
+            </Field>
+            <SecretField
+              label="Zoom Client Secret"
+              placeholder="client secret"
+              value={form.zoom_client_secret}
+              configured={form.zoom_client_secret_configured && !form.clear_zoom_client_secret}
+              onChange={(e) => setForm((f) => ({ ...f, zoom_client_secret: e.target.value, clear_zoom_client_secret: false }))}
+              onClear={() => setForm((f) => ({ ...f, zoom_client_secret: "", clear_zoom_client_secret: true, zoom_client_secret_configured: false }))}
+            />
+            <Field label="Zoom Host Email" hint="Можно оставить пустым, тогда будет использован me">
+              <input className={inputCls} placeholder="host@example.com или me" value={form.zoom_host_email}
+                onChange={(e) => set("zoom_host_email", e.target.value)} />
+            </Field>
+          </div>
+        </div>
+      </Section>
 
       <Section title="AI Провайдер">
         <Field label="Провайдер">

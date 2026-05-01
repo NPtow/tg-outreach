@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import base64
-import os
 from datetime import datetime
 
 import httpx
 from fastapi import HTTPException
+
+from backend.settings_secrets import settings_secret, settings_value
 
 ZOOM_TOKEN_URL = "https://zoom.us/oauth/token"
 ZOOM_API = "https://api.zoom.us/v2"
@@ -11,19 +14,19 @@ ZOOM_PROVIDER = "zoom"
 
 
 def _zoom_account_id() -> str:
-    return (os.getenv("ZOOM_ACCOUNT_ID") or "").strip()
+    return settings_value("zoom_account_id", "ZOOM_ACCOUNT_ID")
 
 
 def _zoom_client_id() -> str:
-    return (os.getenv("ZOOM_CLIENT_ID") or "").strip()
+    return settings_value("zoom_client_id", "ZOOM_CLIENT_ID")
 
 
 def _zoom_client_secret() -> str:
-    return (os.getenv("ZOOM_CLIENT_SECRET") or "").strip()
+    return settings_secret("zoom_client_secret", "ZOOM_CLIENT_SECRET")
 
 
 def zoom_host_user() -> str:
-    return (os.getenv("ZOOM_HOST_EMAIL") or "me").strip()
+    return settings_value("zoom_host_email", "ZOOM_HOST_EMAIL", "me")
 
 
 def zoom_configured() -> bool:

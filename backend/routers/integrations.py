@@ -32,6 +32,11 @@ def google_connect():
     return RedirectResponse(build_google_auth_url())
 
 
+@router.get("/google/auth-url")
+def google_auth_url():
+    return {"url": build_google_auth_url()}
+
+
 @router.get("/google/callback", response_class=HTMLResponse)
 async def google_callback(
     code: str = Query(default=""),

@@ -182,6 +182,7 @@ export const api = {
   // Settings
   getSettings: () => req("GET", "/api/settings/"),
   saveSettings: (data) => req("PUT", "/api/settings/", data),
+  getGoogleAuthUrl: () => req("GET", "/api/integrations/google/auth-url"),
 
   // Proxy Pool
   getProxies: () => req("GET", "/api/proxy-pool/"),
