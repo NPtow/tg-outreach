@@ -1471,6 +1471,48 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("Invalid n8n decision schema", result.error)
 
+    def test_n8n_adapter_accepts_draft_response_wrapper(self):
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "draft": {
+                        "body": "Это короткий тестовый ответ.",
+                        "reply_text": "Это короткий тестовый ответ.",
+                    }
+                }
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def post(self, *args, **kwargs):
+                return FakeResponse()
+
+        request = N8nAgentRequest(
+            event_id="test:draft-wrapper",
+            mode="sandbox",
+            conversation={"id": 1},
+            messages=[],
+        )
+        with patch("backend.n8n_agent.httpx.AsyncClient", FakeClient):
+            result = asyncio.run(call_n8n_agent(request, webhook_url="https://example.test/webhook"))
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.decision.approved)
+        self.assertEqual(result.decision.reply_text, "Это короткий тестовый ответ.")
+        self.assertEqual(result.decision.reason, "draft_response")
+
     def test_agent_pipeline_crud_and_campaign_assignment(self):
         app = FastAPI()
         app.include_router(agent_pipelines_router.router)
