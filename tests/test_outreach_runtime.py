@@ -1932,6 +1932,51 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["n8n"]["base_url_source"], "env:RAILWAY_SERVICE_N8N_URL")
 
+    def test_list_n8n_workflows_from_registry_normalizes_railway_n8n_url_without_protocol(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(
+                AgentRuntimeConfigRegistry(
+                    environment="staging",
+                    project_key="tg-outreach",
+                    scope="n8n",
+                    key="N8N_API_KEY",
+                    value="n8n-secret-key",
+                    is_secret=True,
+                    status="active",
+                )
+            )
+            db.commit()
+
+        async def fake_n8n_request(**kwargs):
+            self.assertEqual(kwargs["base_url"], "https://n8n-staging.test")
+            return {"data": []}
+
+        client = TestClient(app)
+        try:
+            with patch.dict(os.environ, {"RAILWAY_SERVICE_N8N_URL": "n8n-staging.test"}):
+                with patch("backend.routers.agent_pipelines.n8n_request", fake_n8n_request):
+                    response = client.post(
+                        "/api/agent-pipelines/n8n/workflows/from-registry",
+                        json={"registry_environment": "staging", "registry_project_key": "tg-outreach"},
+                    )
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["n8n"]["base_url"], "https://n8n-staging.test")
+
     def test_list_n8n_workflows_from_registry_returns_setup_status_when_api_key_missing(self):
         app = FastAPI()
         app.include_router(agent_pipelines_router.router)

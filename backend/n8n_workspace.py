@@ -10,7 +10,10 @@ class N8nWorkspaceError(Exception):
 
 
 def normalize_n8n_base_url(base_url: str) -> str:
-    return (base_url or "").strip().rstrip("/")
+    base = (base_url or "").strip().rstrip("/")
+    if base and "://" not in base:
+        base = f"https://{base}"
+    return base
 
 
 def workflow_editor_url(base_url: str, workflow_id: Optional[str] = None) -> str:
