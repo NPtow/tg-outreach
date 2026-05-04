@@ -1604,6 +1604,50 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual([c["name"] for c in campaigns_b.json()], ["Project B campaign"])
         self.assertEqual(campaigns_a.json()[0]["project_id"], 10)
 
+    def test_delete_campaign_detaches_conversations_and_removes_targets(self):
+        app = FastAPI()
+        app.include_router(campaigns_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(Account(id=403, name="Ana", phone="+573122997403", app_id="2040", app_hash="hash"))
+            db.add(
+                Campaign(
+                    id=88,
+                    name="Old campaign",
+                    account_id=403,
+                    account_ids="[403]",
+                    messages='["hi"]',
+                    status="done",
+                )
+            )
+            db.add(CampaignTarget(campaign_id=88, username="lead_user", status="sent", account_id=403))
+            db.add(Conversation(id=188, account_id=403, tg_user_id="488", tg_username="lead_user", source_campaign_id=88))
+            db.commit()
+
+        client = TestClient(app)
+        try:
+            with patch("backend.routers.campaigns.tg.stop_campaign", AsyncMock()):
+                response = client.delete("/api/campaigns/88")
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        with self._db() as db:
+            conv = db.query(Conversation).filter(Conversation.id == 188).first()
+            self.assertIsNotNone(conv)
+            self.assertIsNone(conv.source_campaign_id)
+            self.assertIsNone(db.query(Campaign).filter(Campaign.id == 88).first())
+            self.assertEqual(db.query(CampaignTarget).filter(CampaignTarget.campaign_id == 88).count(), 0)
+
     def test_project_can_link_global_account_and_proxy(self):
         app = FastAPI()
         app.include_router(projects_router.router)

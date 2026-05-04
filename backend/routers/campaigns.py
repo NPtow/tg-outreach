@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import AgentPipeline, Campaign, CampaignTarget
+from backend.models import AgentPipeline, Campaign, CampaignTarget, Conversation
 from backend.projects import resolve_project_id
 from backend.runtime_config import owns_telegram_runtime
 from backend.worker_client import forward_to_worker
@@ -228,6 +228,10 @@ async def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
     if not c:
         raise HTTPException(404, "Campaign not found")
     await tg.stop_campaign(campaign_id)
+    db.query(Conversation).filter(Conversation.source_campaign_id == campaign_id).update(
+        {"source_campaign_id": None},
+        synchronize_session=False,
+    )
     db.query(CampaignTarget).filter(CampaignTarget.campaign_id == campaign_id).delete()
     db.delete(c)
     db.commit()
