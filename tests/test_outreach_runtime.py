@@ -30,7 +30,7 @@ from backend.meeting_scheduler import (
     extract_meeting_booking_intent,
     get_existing_scheduled_meeting,
 )
-from backend.models import Account, AgentPipeline, AgentRun, Campaign, CampaignTarget, Conversation, Message, Project, ProjectAccount, ProjectProxy, PromptTemplate, ProxyPool, ScenarioCard, ScheduledMeeting, Settings
+from backend.models import Account, AgentPipeline, AgentRun, AgentRuntimeConfigRegistry, Campaign, CampaignTarget, Conversation, Message, Project, ProjectAccount, ProjectProxy, PromptTemplate, ProxyPool, ScenarioCard, ScheduledMeeting, Settings
 from backend.n8n_agent import N8nAgentCallResult, N8nAgentDecision, N8nAgentRequest, call_n8n_agent
 from backend.pipeline_runner import run_pipeline_for_auto_reply
 from backend.routers import accounts as accounts_router
@@ -55,6 +55,7 @@ from backend.scenarios import (
     serialize_scenario,
 )
 from backend.sandbox import replay_conversation_n8n_sandbox, replay_conversation_sandbox
+from backend.security import decrypt_value
 from backend.google_calendar import build_calendar_event_description, build_google_auth_url, find_first_free_slot
 from backend.zoom_meetings import build_zoom_meeting_payload, zoom_host_user
 import backend.telegram_client as tg
@@ -1596,6 +1597,166 @@ class OutreachRuntimeTests(unittest.TestCase):
             self.assertEqual(db.query(ProjectAccount).count(), 1)
             self.assertEqual(db.query(ProjectProxy).count(), 1)
 
+    def test_install_n8n_workflow_syncs_registry_settings_and_assigns_accounts(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        registry_rows = [
+            ("N8N_BASE_URL", "https://n8n.test", False),
+            ("N8N_API_KEY", "n8n-secret-key", True),
+            ("OPENAI_PROVIDER", "openai", False),
+            ("OPENAI_MODEL_DEFAULT", "gpt-5.4-mini", False),
+            ("OPENAI_API_KEY", "sk-proj-registry-secret", True),
+            ("GOOGLE_CLIENT_ID", "google-client-id", False),
+            ("GOOGLE_CLIENT_SECRET", "google-client-secret", True),
+            ("GOOGLE_REDIRECT_URI_STAGING", "https://tg.test/api/integrations/google/callback", False),
+            ("GOOGLE_OAUTH_STATE_SECRET", "google-state-secret", True),
+            ("GOOGLE_CALENDAR_EMAIL", "ops@example.com", False),
+            ("ZOOM_ACCOUNT_ID", "zoom-account", False),
+            ("ZOOM_CLIENT_ID", "zoom-client", False),
+            ("ZOOM_CLIENT_SECRET", "zoom-secret", True),
+            ("ZOOM_HOST_EMAIL", "ops@example.com", False),
+        ]
+        with self._db() as db:
+            for key, value, is_secret in registry_rows:
+                db.add(
+                    AgentRuntimeConfigRegistry(
+                        environment="staging",
+                        project_key="tg-outreach",
+                        scope="runtime",
+                        key=key,
+                        value=value,
+                        is_secret=is_secret,
+                        source="test",
+                        status="active",
+                    )
+                )
+            db.add(Account(id=501, name="Ana", phone="+573122997501", app_id="2040", app_hash="hash"))
+            db.commit()
+
+        workflow = {
+            "id": "exported-id",
+            "name": "HR Discovery",
+            "active": False,
+            "nodes": [
+                {
+                    "id": "hook",
+                    "type": "n8n-nodes-base.webhook",
+                    "parameters": {"path": "hr-discovery-agent"},
+                }
+            ],
+            "connections": {},
+        }
+        calls = []
+
+        async def fake_n8n_request(**kwargs):
+            calls.append(kwargs)
+            if kwargs["method"] == "POST" and kwargs["path"] == "workflows":
+                self.assertNotIn("id", kwargs["json_body"])
+                self.assertNotIn("active", kwargs["json_body"])
+                return {"id": "wf-installed", "name": kwargs["json_body"]["name"], "nodes": kwargs["json_body"]["nodes"]}
+            if kwargs["method"] == "POST" and kwargs["path"] == "workflows/wf-installed/activate":
+                return {"ok": True}
+            self.fail(f"unexpected n8n request: {kwargs}")
+
+        client = TestClient(app)
+        try:
+            with patch("backend.agent_pipeline_installer.n8n_request", fake_n8n_request):
+                response = client.post(
+                    "/api/agent-pipelines/n8n/install",
+                    json={
+                        "workflow": workflow,
+                        "project_id": None,
+                        "mode": "live",
+                        "status": "active",
+                        "assign_account_ids": [501],
+                        "registry_environment": "staging",
+                        "registry_project_key": "tg-outreach",
+                    },
+                )
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["workflow"]["id"], "wf-installed")
+        self.assertTrue(payload["workflow"]["activated"])
+        self.assertEqual(payload["workflow"]["webhook_url"], "https://n8n.test/webhook/hr-discovery-agent")
+        self.assertEqual(payload["pipeline"]["status"], "active")
+        self.assertEqual(payload["pipeline"]["config"]["workflow_id"], "wf-installed")
+        self.assertEqual(payload["pipeline"]["config"]["mode"], "live")
+        self.assertEqual(payload["assigned_account_ids"], [501])
+        self.assertTrue(payload["settings_sync"]["OPENAI_API_KEY"]["configured"])
+        response_text = json.dumps(payload)
+        self.assertNotIn("sk-proj-registry-secret", response_text)
+        self.assertNotIn("n8n-secret-key", response_text)
+        self.assertEqual([call["path"] for call in calls], ["workflows", "workflows/wf-installed/activate"])
+
+        with self._db() as db:
+            settings = db.query(Settings).filter(Settings.id == 1).one()
+            account = db.query(Account).filter(Account.id == 501).one()
+            self.assertEqual(settings.provider, "openai")
+            self.assertEqual(settings.model, "gpt-5.4-mini")
+            self.assertEqual(decrypt_value(settings.openai_key), "sk-proj-registry-secret")
+            self.assertEqual(settings.google_client_id, "google-client-id")
+            self.assertEqual(decrypt_value(settings.google_client_secret), "google-client-secret")
+            self.assertEqual(settings.google_redirect_uri, "https://tg.test/api/integrations/google/callback")
+            self.assertEqual(decrypt_value(settings.google_oauth_state_secret), "google-state-secret")
+            self.assertEqual(settings.zoom_client_id, "zoom-client")
+            self.assertEqual(decrypt_value(settings.zoom_client_secret), "zoom-secret")
+            self.assertEqual(account.agent_pipeline_id, payload["pipeline"]["id"])
+
+    def test_install_n8n_workflow_rejects_hardcoded_secret_values(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        workflow = {
+            "name": "Unsafe workflow",
+            "nodes": [
+                {
+                    "id": "hook",
+                    "type": "n8n-nodes-base.webhook",
+                    "parameters": {"path": "unsafe-agent", "apiKey": "sk-proj-hardcoded-secret-value"},
+                }
+            ],
+        }
+        client = TestClient(app)
+        try:
+            response = client.post(
+                "/api/agent-pipelines/n8n/install",
+                json={
+                    "workflow": workflow,
+                    "n8n_base_url": "https://n8n.test",
+                    "n8n_api_key": "n8n-secret-key",
+                    "registry_environment": "staging",
+                    "registry_project_key": "tg-outreach",
+                },
+            )
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("hardcoded secret", response.json()["detail"])
+
     def test_bind_n8n_workflow_updates_pipeline_config(self):
         app = FastAPI()
         app.include_router(agent_pipelines_router.router)
@@ -1644,6 +1805,260 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["config"]["workflow_editor_url"], "http://localhost:5678/workflow/wf_1")
         self.assertEqual(payload["config"]["shared_secret"], "")
         self.assertTrue(payload["config"]["shared_secret_configured"])
+
+    def test_list_n8n_workflows_from_registry_uses_runtime_connection_without_leaking_api_key(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(
+                AgentRuntimeConfigRegistry(
+                    environment="staging",
+                    project_key="tg-outreach",
+                    scope="n8n",
+                    key="N8N_BASE_URL",
+                    value="https://n8n.test",
+                    is_secret=False,
+                    status="active",
+                )
+            )
+            db.add(
+                AgentRuntimeConfigRegistry(
+                    environment="staging",
+                    project_key="tg-outreach",
+                    scope="n8n",
+                    key="N8N_API_KEY",
+                    value="n8n-secret-key",
+                    is_secret=True,
+                    status="active",
+                )
+            )
+            db.commit()
+
+        calls = []
+
+        async def fake_n8n_request(**kwargs):
+            calls.append(kwargs)
+            self.assertEqual(kwargs["base_url"], "https://n8n.test")
+            self.assertEqual(kwargs["api_key"], "n8n-secret-key")
+            return {
+                "data": [
+                    {
+                        "id": "wf-active",
+                        "name": "HR Discovery Agent",
+                        "active": True,
+                        "nodes": [
+                            {
+                                "type": "n8n-nodes-base.webhook",
+                                "parameters": {"path": "hr-discovery"},
+                            }
+                        ],
+                    }
+                ]
+            }
+
+        client = TestClient(app)
+        try:
+            with patch("backend.routers.agent_pipelines.n8n_request", fake_n8n_request):
+                response = client.post(
+                    "/api/agent-pipelines/n8n/workflows/from-registry",
+                    json={"registry_environment": "staging", "registry_project_key": "tg-outreach"},
+                )
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["n8n"]["base_url"], "https://n8n.test")
+        self.assertNotIn("n8n-secret-key", json.dumps(payload))
+        self.assertEqual(payload["workflows"][0]["id"], "wf-active")
+        self.assertEqual(payload["workflows"][0]["webhook_path"], "hr-discovery")
+        self.assertEqual(payload["workflows"][0]["webhook_url"], "https://n8n.test/webhook/hr-discovery")
+        self.assertTrue(payload["workflows"][0]["active"])
+        self.assertEqual(calls[0]["path"], "workflows")
+
+    def test_connect_existing_n8n_workflow_runs_smoke_test_before_creating_pipeline(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            for key, value, is_secret in [
+                ("N8N_BASE_URL", "https://n8n.test", False),
+                ("N8N_API_KEY", "n8n-secret-key", True),
+            ]:
+                db.add(
+                    AgentRuntimeConfigRegistry(
+                        environment="staging",
+                        project_key="tg-outreach",
+                        scope="n8n",
+                        key=key,
+                        value=value,
+                        is_secret=is_secret,
+                        status="active",
+                    )
+                )
+            db.commit()
+
+        async def fake_n8n_request(**kwargs):
+            self.assertEqual(kwargs["path"], "workflows/wf-active")
+            return {
+                "id": "wf-active",
+                "name": "HR Discovery Agent",
+                "active": True,
+                "nodes": [
+                    {
+                        "type": "n8n-nodes-base.webhook",
+                        "parameters": {"path": "hr-discovery"},
+                    }
+                ],
+            }
+
+        decision = N8nAgentDecision(
+            approved=True,
+            stage="qualification",
+            intent="trust_question",
+            reply_text="Это короткий тестовый ответ.",
+            ops_action="none",
+        )
+
+        client = TestClient(app)
+        try:
+            with patch("backend.routers.agent_pipelines.n8n_request", fake_n8n_request):
+                with patch(
+                    "backend.routers.agent_pipelines.call_n8n_agent",
+                    AsyncMock(return_value=N8nAgentCallResult(ok=True, decision=decision, raw_response=decision.model_dump(mode="json"), status_code=200)),
+                ) as smoke:
+                    response = client.post(
+                        "/api/agent-pipelines/n8n/workflows/connect",
+                        json={
+                            "workflow_id": "wf-active",
+                            "project_id": None,
+                            "mode": "sandbox",
+                            "status": "active",
+                            "registry_environment": "staging",
+                            "registry_project_key": "tg-outreach",
+                        },
+                    )
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["smoke_test"]["status"], "passed")
+        self.assertEqual(payload["pipeline"]["config"]["workflow_id"], "wf-active")
+        self.assertEqual(payload["pipeline"]["config"]["workflow_name"], "HR Discovery Agent")
+        self.assertEqual(payload["pipeline"]["config"]["webhook_url"], "https://n8n.test/webhook/hr-discovery")
+        self.assertEqual(payload["pipeline"]["config"]["last_smoke_test_status"], "passed")
+        self.assertEqual(payload["pipeline"]["config"]["mode"], "sandbox")
+        self.assertEqual(smoke.await_args.kwargs["webhook_url"], "https://n8n.test/webhook/hr-discovery")
+        self.assertEqual(smoke.await_args.args[0].messages[0]["text"], "Что за продукт?")
+
+    def test_connect_existing_n8n_workflow_rejects_invalid_smoke_response(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(AgentRuntimeConfigRegistry(environment="staging", project_key="tg-outreach", scope="n8n", key="N8N_BASE_URL", value="https://n8n.test", status="active"))
+            db.add(AgentRuntimeConfigRegistry(environment="staging", project_key="tg-outreach", scope="n8n", key="N8N_API_KEY", value="n8n-secret-key", is_secret=True, status="active"))
+            db.commit()
+
+        async def fake_n8n_request(**kwargs):
+            return {
+                "id": "wf-active",
+                "name": "Broken Agent",
+                "active": True,
+                "nodes": [{"type": "n8n-nodes-base.webhook", "parameters": {"path": "broken-agent"}}],
+            }
+
+        decision = N8nAgentDecision(approved=True, stage="qualification", intent="other", reply_text="", ops_action="none")
+        client = TestClient(app)
+        try:
+            with patch("backend.routers.agent_pipelines.n8n_request", fake_n8n_request):
+                with patch("backend.routers.agent_pipelines.call_n8n_agent", AsyncMock(return_value=N8nAgentCallResult(ok=True, decision=decision))):
+                    response = client.post(
+                        "/api/agent-pipelines/n8n/workflows/connect",
+                        json={
+                            "workflow_id": "wf-active",
+                            "registry_environment": "staging",
+                            "registry_project_key": "tg-outreach",
+                        },
+                    )
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("empty reply_text", response.json()["detail"])
+
+    def test_connect_existing_n8n_workflow_rejects_inactive_workflow(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(AgentRuntimeConfigRegistry(environment="staging", project_key="tg-outreach", scope="n8n", key="N8N_BASE_URL", value="https://n8n.test", status="active"))
+            db.add(AgentRuntimeConfigRegistry(environment="staging", project_key="tg-outreach", scope="n8n", key="N8N_API_KEY", value="n8n-secret-key", is_secret=True, status="active"))
+            db.commit()
+
+        async def fake_n8n_request(**kwargs):
+            return {
+                "id": "wf-inactive",
+                "name": "Inactive Agent",
+                "active": False,
+                "nodes": [{"type": "n8n-nodes-base.webhook", "parameters": {"path": "inactive-agent"}}],
+            }
+
+        client = TestClient(app)
+        try:
+            with patch("backend.routers.agent_pipelines.n8n_request", fake_n8n_request):
+                response = client.post(
+                    "/api/agent-pipelines/n8n/workflows/connect",
+                    json={
+                        "workflow_id": "wf-inactive",
+                        "registry_environment": "staging",
+                        "registry_project_key": "tg-outreach",
+                    },
+                )
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("must be active", response.json()["detail"])
 
     def test_auto_reply_uses_active_agent_pipeline_instead_of_legacy_prompt(self):
         with self._db() as db:

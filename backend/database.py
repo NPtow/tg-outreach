@@ -25,7 +25,7 @@ def get_db():
 
 
 def init_db():
-    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, AgentPipeline, AgentPipelineVersion, DoNotContact, Contact, ContactBatch, RuntimeEvent, ProxyPool, Integration, ScheduledMeeting, AgentRun, ScenarioCard, Project, ProjectAccount, ProjectProxy  # noqa
+    from backend.models import Account, Conversation, Message, Settings, Campaign, CampaignTarget, PromptTemplate, AgentPipeline, AgentPipelineVersion, AgentRuntimeConfigRegistry, DoNotContact, Contact, ContactBatch, RuntimeEvent, ProxyPool, Integration, ScheduledMeeting, AgentRun, ScenarioCard, Project, ProjectAccount, ProjectProxy  # noqa
     Base.metadata.create_all(bind=engine)
 
     # Add new columns to existing tables (safe to re-run — errors for existing columns are swallowed)

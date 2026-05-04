@@ -154,9 +154,12 @@ export const api = {
   archivePipeline: (id) => req("DELETE", `/api/agent-pipelines/${id}`),
   replayPipeline: (id, data) => req("POST", `/api/agent-pipelines/${id}/replay`, data),
   listN8nWorkflows: (data) => req("POST", "/api/agent-pipelines/n8n/workflows", data),
+  listN8nWorkflowsFromRegistry: (data = {}) => req("POST", "/api/agent-pipelines/n8n/workflows/from-registry", data),
+  connectN8nWorkflow: (data) => req("POST", "/api/agent-pipelines/n8n/workflows/connect", data),
   getN8nWorkflow: (data, workflow_id) => req("POST", `/api/agent-pipelines/n8n/workflows/get?workflow_id=${encodeURIComponent(workflow_id)}`, data),
   importN8nWorkflow: (data) => req("POST", "/api/agent-pipelines/n8n/workflows/import", data),
   bindN8nWorkflow: (id, data) => req("POST", `/api/agent-pipelines/${id}/bind-n8n-workflow`, data),
+  installN8nPipeline: (data) => req("POST", "/api/agent-pipelines/n8n/install", data),
 
   // Do Not Contact
   getDNC: () => req("GET", "/api/dnc/"),

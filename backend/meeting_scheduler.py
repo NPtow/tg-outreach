@@ -262,7 +262,9 @@ async def book_meeting_from_agent_payload(
 
     day_start = datetime(start.year, start.month, start.day, DEFAULT_WINDOW_START_HOUR, tzinfo=MSK_TZ)
     day_end = datetime(start.year, start.month, start.day, DEFAULT_WINDOW_END_HOUR, tzinfo=MSK_TZ)
-    busy = await get_busy_intervals(db, day_start, day_end)
+    busy_start = min(day_start, start)
+    busy_end = max(day_end, end)
+    busy = await get_busy_intervals(db, busy_start, busy_end)
     if _busy_overlaps(start, end, busy):
         alternatives: list[str] = []
         cursor_day = day_start

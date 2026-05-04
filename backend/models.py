@@ -130,6 +130,22 @@ class AgentPipelineVersion(Base):
     pipeline = relationship("AgentPipeline", back_populates="versions")
 
 
+class AgentRuntimeConfigRegistry(Base):
+    """Runtime config source of truth for staging/production secrets."""
+    __tablename__ = "agent_runtime_config_registry"
+
+    id = Column(Integer, primary_key=True)
+    environment = Column(String(80), nullable=True, index=True)
+    project_key = Column(String(120), nullable=True, index=True)
+    scope = Column(String(120), nullable=True)
+    key = Column(String(200), nullable=False, index=True)
+    value = Column(Text, nullable=True)
+    is_secret = Column(Boolean, default=False)
+    source = Column(String(120), nullable=True)
+    status = Column(String(40), default="active", index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 class DoNotContact(Base):
     """Global blacklist. Contacts here are never messaged."""
     __tablename__ = "do_not_contact"
