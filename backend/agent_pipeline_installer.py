@@ -305,6 +305,7 @@ def _resolve_runtime_value(
     explicit: str = "",
     keys: list[str],
     env_name: str,
+    fallback_env_names: Optional[list[str]] = None,
     environment: str,
     project_key: str,
 ) -> tuple[str, str]:
@@ -316,6 +317,10 @@ def _resolve_runtime_value(
     env_value = _normal(os.getenv(env_name))
     if env_value:
         return env_value, f"env:{env_name}"
+    for fallback_env_name in fallback_env_names or []:
+        env_value = _normal(os.getenv(fallback_env_name))
+        if env_value:
+            return env_value, f"env:{fallback_env_name}"
     return "", ""
 
 
@@ -334,6 +339,7 @@ def resolve_n8n_runtime_connection(
         explicit=n8n_base_url,
         keys=["N8N_BASE_URL"],
         env_name="N8N_BASE_URL",
+        fallback_env_names=["RAILWAY_SERVICE_N8N_URL", "WEBHOOK_URL"],
         environment=environment,
         project_key=project_key,
     )
