@@ -96,6 +96,17 @@ class N8nRuntimeConnection:
     api_key_source: str
 
 
+@dataclass
+class N8nRuntimeSetupStatus:
+    base_url: str
+    api_key: str
+    environment: str
+    project_key: str
+    base_url_source: str
+    api_key_source: str
+    missing: list[str]
+
+
 def default_registry_environment() -> str:
     return (
         os.getenv("RUNTIME_CONFIG_ENV")
@@ -324,14 +335,14 @@ def _resolve_runtime_value(
     return "", ""
 
 
-def resolve_n8n_runtime_connection(
+def resolve_n8n_runtime_setup_status(
     db: Session,
     *,
     registry_environment: str = "",
     registry_project_key: str = "",
     n8n_base_url: str = "",
     n8n_api_key: str = "",
-) -> N8nRuntimeConnection:
+) -> N8nRuntimeSetupStatus:
     environment = _normal(registry_environment) or default_registry_environment()
     project_key = _normal(registry_project_key) or default_registry_project_key()
     base_url, base_url_source = _resolve_runtime_value(
@@ -352,17 +363,48 @@ def resolve_n8n_runtime_connection(
         project_key=project_key,
     )
     base_url = normalize_n8n_base_url(base_url)
+    missing: list[str] = []
     if not base_url:
-        raise PipelineInstallError(400, "N8N_BASE_URL is required in request, registry, or environment")
+        missing.append("N8N_BASE_URL")
     if not api_key:
-        raise PipelineInstallError(400, "N8N_API_KEY is required in request, registry, or environment")
-    return N8nRuntimeConnection(
+        missing.append("N8N_API_KEY")
+    return N8nRuntimeSetupStatus(
         base_url=base_url,
         api_key=api_key,
         environment=environment,
         project_key=project_key,
         base_url_source=base_url_source,
         api_key_source=api_key_source,
+        missing=missing,
+    )
+
+
+def resolve_n8n_runtime_connection(
+    db: Session,
+    *,
+    registry_environment: str = "",
+    registry_project_key: str = "",
+    n8n_base_url: str = "",
+    n8n_api_key: str = "",
+) -> N8nRuntimeConnection:
+    setup = resolve_n8n_runtime_setup_status(
+        db,
+        registry_environment=registry_environment,
+        registry_project_key=registry_project_key,
+        n8n_base_url=n8n_base_url,
+        n8n_api_key=n8n_api_key,
+    )
+    if "N8N_BASE_URL" in setup.missing:
+        raise PipelineInstallError(400, "N8N_BASE_URL is required in request, registry, or environment")
+    if "N8N_API_KEY" in setup.missing:
+        raise PipelineInstallError(400, "N8N_API_KEY is required in request, registry, or environment")
+    return N8nRuntimeConnection(
+        base_url=setup.base_url,
+        api_key=setup.api_key,
+        environment=setup.environment,
+        project_key=setup.project_key,
+        base_url_source=setup.base_url_source,
+        api_key_source=setup.api_key_source,
     )
 
 

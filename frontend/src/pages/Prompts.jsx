@@ -107,7 +107,9 @@ function PipelineEditor({ projectId, selected, pipelines, onSaved }) {
       const result = await api.listN8nWorkflowsFromRegistry({});
       setWorkflows(result.workflows || []);
       setN8nInfo(result.n8n || null);
-      if ((result.workflows || []).length === 0) {
+      if (result.setup_required) {
+        setMessage(`n8n найден, но подключение не завершено. Не хватает: ${(result.missing || []).join(", ") || "runtime config"}.`);
+      } else if ((result.workflows || []).length === 0) {
         setMessage("n8n подключен, но workflows не найдены.");
       }
     } catch (e) {

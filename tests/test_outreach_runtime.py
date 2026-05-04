@@ -1932,6 +1932,50 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["n8n"]["base_url_source"], "env:RAILWAY_SERVICE_N8N_URL")
 
+    def test_list_n8n_workflows_from_registry_returns_setup_status_when_api_key_missing(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(
+                AgentRuntimeConfigRegistry(
+                    environment="staging",
+                    project_key="tg-outreach",
+                    scope="n8n",
+                    key="N8N_BASE_URL",
+                    value="https://n8n.test",
+                    status="active",
+                )
+            )
+            db.commit()
+
+        client = TestClient(app)
+        try:
+            response = client.post(
+                "/api/agent-pipelines/n8n/workflows/from-registry",
+                json={"registry_environment": "staging", "registry_project_key": "tg-outreach"},
+            )
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["setup_required"])
+        self.assertEqual(payload["missing"], ["N8N_API_KEY"])
+        self.assertEqual(payload["n8n"]["base_url"], "https://n8n.test")
+        self.assertFalse(payload["n8n"]["api_key_configured"])
+        self.assertEqual(payload["workflows"], [])
+
     def test_connect_existing_n8n_workflow_runs_smoke_test_before_creating_pipeline(self):
         app = FastAPI()
         app.include_router(agent_pipelines_router.router)

@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.agent_pipeline_installer import PipelineInstallError, install_n8n_pipeline, resolve_n8n_runtime_connection
+from backend.agent_pipeline_installer import PipelineInstallError, install_n8n_pipeline, resolve_n8n_runtime_connection, resolve_n8n_runtime_setup_status
 from backend.models import AgentPipeline, AgentPipelineVersion, Conversation, Message
 from backend.n8n_agent import N8nAgentRequest, call_n8n_agent
 from backend.projects import resolve_project_id
@@ -354,6 +354,28 @@ async def list_n8n_workflows(data: N8nWorkspaceRequest):
 
 @router.post("/n8n/workflows/from-registry")
 async def list_n8n_workflows_from_registry(data: N8nWorkflowRegistryRequest, db: Session = Depends(get_db)):
+    setup = resolve_n8n_runtime_setup_status(
+        db,
+        registry_environment=data.registry_environment,
+        registry_project_key=data.registry_project_key,
+        n8n_base_url=data.n8n_base_url,
+        n8n_api_key=data.n8n_api_key,
+    )
+    if setup.missing:
+        return {
+            "ok": False,
+            "setup_required": True,
+            "missing": setup.missing,
+            "n8n": {
+                "base_url": setup.base_url,
+                "environment": setup.environment,
+                "project_key": setup.project_key,
+                "base_url_source": setup.base_url_source,
+                "api_key_configured": bool(setup.api_key),
+                "api_key_source": setup.api_key_source,
+            },
+            "workflows": [],
+        }
     try:
         connection = resolve_n8n_runtime_connection(
             db,
