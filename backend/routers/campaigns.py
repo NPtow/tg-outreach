@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -36,6 +36,27 @@ class CampaignCreate(BaseModel):
     stop_keywords: Optional[str] = None   # comma-separated
     hot_keywords: Optional[str] = None    # comma-separated
     max_messages: Optional[int] = None
+
+
+def _pipeline_config(pipeline: AgentPipeline) -> dict[str, Any]:
+    try:
+        return json.loads(pipeline.config_json or "{}")
+    except Exception:
+        return {}
+
+
+def _ensure_campaign_pipeline_live(db: Session, agent_pipeline_id: Optional[int]) -> None:
+    if not agent_pipeline_id:
+        return
+    pipeline = db.query(AgentPipeline).filter(AgentPipeline.id == int(agent_pipeline_id)).first()
+    if not pipeline:
+        raise HTTPException(400, "Agent pipeline not found")
+    if pipeline.status != "active":
+        raise HTTPException(400, f"Agent pipeline '{pipeline.name}' must be active before using it for campaign auto-reply")
+    if pipeline.type == "n8n_webhook":
+        mode = str(_pipeline_config(pipeline).get("mode") or "sandbox").strip().lower()
+        if mode != "live":
+            raise HTTPException(400, f"Agent pipeline '{pipeline.name}' must be live before using it for campaign auto-reply")
 
 
 @router.get("/")
@@ -103,6 +124,7 @@ def create_campaign(data: CampaignCreate, db: Session = Depends(get_db)):
         raise HTTPException(400, "Need at least one target")
     if not data.account_ids:
         raise HTTPException(400, "Need at least one account")
+    _ensure_campaign_pipeline_live(db, data.agent_pipeline_id)
 
     c = Campaign(
         project_id=resolve_project_id(db, data.project_id),
@@ -156,6 +178,7 @@ async def start_campaign(campaign_id: int, db: Session = Depends(get_db)):
         c = db.query(Campaign).filter(Campaign.id == campaign_id).first()
         if not c:
             raise HTTPException(404, "Campaign not found")
+        _ensure_campaign_pipeline_live(db, c.agent_pipeline_id)
         if owns_telegram_runtime():
             result = await tg.preflight_and_start_campaign(campaign_id)
         else:

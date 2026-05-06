@@ -10,6 +10,8 @@ const STATUS = {
   done:    { cls: "bg-blue-500/15 text-blue-400",       label: "Done" },
 };
 
+const isLivePipeline = (pipeline) => pipeline?.status === "active" && (pipeline?.config?.mode || "live") === "live";
+
 function Modal({ title, onClose, children }) {
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
@@ -320,11 +322,11 @@ function CreateModal({ projectId, accounts, pipelines, onClose, onCreated }) {
           </label>
           <select className={inputCls} value={form.agent_pipeline_id} onChange={e => setForm({...form, agent_pipeline_id: e.target.value})}>
             <option value="">— legacy prompt fallback —</option>
-            {pipelines.filter(p => p.status === "active").map(p => (
+            {pipelines.filter(isLivePipeline).map(p => (
               <option key={p.id} value={p.id}>{p.name} · {p.type}</option>
             ))}
           </select>
-          <p className="text-[11px] text-zinc-600 mt-1.5">Если выбран pipeline, он побеждает старые промпты кампании.</p>
+          <p className="text-[11px] text-zinc-600 mt-1.5">Показываются только active live pipelines. Если выбран pipeline, он побеждает старые промпты кампании.</p>
         </div>
 
         {/* Messages */}

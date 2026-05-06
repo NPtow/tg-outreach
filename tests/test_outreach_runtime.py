@@ -1557,6 +1557,96 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(campaigns_response.json()[0]["agent_pipeline_id"], pipeline_id)
         self.assertEqual(campaigns_response.json()[0]["agent_pipeline_name"], "n8n HR agent")
 
+    def test_create_campaign_rejects_sandbox_agent_pipeline(self):
+        app = FastAPI()
+        app.include_router(campaigns_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(Account(id=404, name="Ana", phone="+573122997404", app_id="2040", app_hash="hash"))
+            db.add(
+                AgentPipeline(
+                    id=404,
+                    name="Sandbox pipeline",
+                    type="n8n_webhook",
+                    status="active",
+                    config_json=json.dumps({"mode": "sandbox", "webhook_url": "https://n8n.test/webhook"}),
+                )
+            )
+            db.commit()
+
+        client = TestClient(app)
+        try:
+            response = client.post("/api/campaigns/", json={
+                "name": "Bad pipeline campaign",
+                "account_ids": [404],
+                "messages": ["hi"],
+                "targets": ["lead_user"],
+                "agent_pipeline_id": 404,
+            })
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("must be live", response.json()["detail"])
+
+    def test_start_campaign_rejects_existing_sandbox_agent_pipeline_before_worker_call(self):
+        app = FastAPI()
+        app.include_router(campaigns_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(Account(id=405, name="Ana", phone="+573122997405", app_id="2040", app_hash="hash"))
+            db.add(
+                AgentPipeline(
+                    id=405,
+                    name="Sandbox pipeline",
+                    type="n8n_webhook",
+                    status="active",
+                    config_json=json.dumps({"mode": "sandbox", "webhook_url": "https://n8n.test/webhook"}),
+                )
+            )
+            db.add(
+                Campaign(
+                    id=405,
+                    name="Existing bad campaign",
+                    account_id=405,
+                    account_ids="[405]",
+                    messages='["hi"]',
+                    status="draft",
+                    agent_pipeline_id=405,
+                )
+            )
+            db.commit()
+
+        client = TestClient(app)
+        try:
+            with patch("backend.routers.campaigns.owns_telegram_runtime", return_value=False):
+                with patch("backend.routers.campaigns.forward_to_worker", AsyncMock()) as forward:
+                    response = client.post("/api/campaigns/405/start")
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("must be live", response.json()["detail"])
+        self.assertEqual(forward.await_count, 0)
+
     def test_campaigns_are_scoped_by_project(self):
         app = FastAPI()
         app.include_router(projects_router.router)
