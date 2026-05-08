@@ -86,6 +86,26 @@ async def replay_pipeline_for_conversation(
     )
 
 
+async def smoke_pipeline_for_conversation(
+    db: Session,
+    *,
+    pipeline: AgentPipeline,
+    conversation: Conversation,
+    messages: Iterable[Message],
+    dry_run_tools: bool = True,
+) -> dict:
+    return await _run_pipeline(
+        db,
+        pipeline=pipeline,
+        conversation=conversation,
+        messages=messages,
+        event_id=f"pipeline-smoke:{pipeline.id}:{conversation.id}",
+        mode="sandbox",
+        dry_run_tools=dry_run_tools,
+        run_type="pipeline_smoke_auto_reply",
+    )
+
+
 async def _run_pipeline(
     db: Session,
     *,

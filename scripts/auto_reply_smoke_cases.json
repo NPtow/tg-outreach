@@ -1,0 +1,36 @@
+{
+  "defaults": {
+    "base_url": "https://tg-outreach-staging.up.railway.app",
+    "pipeline_id": 2,
+    "conversation_id": 6,
+    "expected_verdict": "SEND",
+    "dry_run_tools": true
+  },
+  "cases": [
+    {
+      "name": "chat_6_meeting_status",
+      "description": "Проверяет, что вопрос про уже назначенную встречу не блокируется.",
+      "messages": ["ну и что там по встрече"]
+    },
+    {
+      "name": "chat_6_meeting_status_two_messages",
+      "description": "Проверяет пачку сообщений подряд после назначенной встречи.",
+      "messages": ["ну и что там по встрече", "пришли ссылку"]
+    },
+    {
+      "name": "chat_6_slot_followup",
+      "description": "Проверяет, что новый слот/логистика не дает NO_REPLY.",
+      "messages": ["давай завтра в 17:00"]
+    },
+    {
+      "name": "chat_6_trust_question",
+      "description": "Проверяет обычный вопрос не про встречу.",
+      "messages": ["а что это за продукт?"]
+    },
+    {
+      "name": "chat_6_postpone",
+      "description": "Проверяет перенос без жесткого отказа.",
+      "messages": ["я позже вернусь по времени"]
+    }
+  ]
+}

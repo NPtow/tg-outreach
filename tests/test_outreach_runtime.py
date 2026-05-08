@@ -1771,6 +1771,141 @@ class OutreachRuntimeTests(unittest.TestCase):
         latest_user_messages = captured_request.conversation_state["latest_user_messages"]
         self.assertEqual([item["text"] for item in latest_user_messages], ["Завтра в 15", "И пришли ссылку"])
 
+    def test_agent_pipeline_smoke_auto_reply_uses_synthetic_messages_and_returns_send(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(
+                AgentPipeline(
+                    id=49,
+                    name="n8n smoke",
+                    type="n8n_webhook",
+                    status="active",
+                    config_json=json.dumps({"mode": "live", "webhook_url": "https://n8n.test/webhook"}),
+                )
+            )
+            db.add(Conversation(id=149, account_id=49, tg_user_id="749", status="active"))
+            db.add(Message(id=1491, conversation_id=149, role="assistant", text="Когда удобно созвониться?"))
+            db.commit()
+
+        captured_request = None
+
+        async def fake_call(request, **kwargs):
+            nonlocal captured_request
+            captured_request = request
+            return N8nAgentCallResult(
+                ok=True,
+                decision=N8nAgentDecision(
+                    approved=True,
+                    stage="scheduling",
+                    intent="availability_offer",
+                    reply_text="Да, понял. Проверю по встрече.",
+                    ops_action="none",
+                ),
+                raw_response={"draft": {"body": "Да, понял. Проверю по встрече."}},
+                status_code=200,
+            )
+
+        client = TestClient(app)
+        try:
+            with patch("backend.pipeline_runner.retrieve_dify_knowledge_cards", AsyncMock(return_value={
+                "configured": False,
+                "query": "",
+                "cards": [],
+                "error": "dify_not_configured",
+            })):
+                with patch("backend.pipeline_runner.call_n8n_agent", fake_call):
+                    response = client.post(
+                        "/api/agent-pipelines/49/smoke-auto-reply",
+                        json={
+                            "conversation_id": 149,
+                            "messages": ["Завтра в 15", "И пришли ссылку"],
+                            "dry_run_tools": True,
+                        },
+                    )
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["verdict"], "SEND")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["synthetic_messages"], ["Завтра в 15", "И пришли ссылку"])
+        self.assertEqual([item["text"] for item in captured_request.messages[-2:]], ["Завтра в 15", "И пришли ссылку"])
+        self.assertEqual([item["text"] for item in captured_request.conversation_state["latest_user_messages"]], ["Завтра в 15", "И пришли ссылку"])
+        with self._db() as db:
+            persisted = db.query(Message).filter(Message.conversation_id == 149).all()
+        self.assertEqual(len(persisted), 1)
+
+    def test_agent_pipeline_smoke_auto_reply_returns_blocked_verdict(self):
+        app = FastAPI()
+        app.include_router(agent_pipelines_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(
+                AgentPipeline(
+                    id=50,
+                    name="n8n smoke blocked",
+                    type="n8n_webhook",
+                    status="active",
+                    config_json=json.dumps({"mode": "live", "webhook_url": "https://n8n.test/webhook"}),
+                )
+            )
+            db.add(Conversation(id=150, account_id=50, tg_user_id="750", status="active"))
+            db.add(Message(id=1501, conversation_id=150, role="assistant", text="Расскажите про опыт."))
+            db.commit()
+
+        decision = N8nAgentDecision(
+            approved=False,
+            stage="qualification",
+            intent="other",
+            reply_text="Тестовый ответ без approve.",
+            ops_action="none",
+        )
+        client = TestClient(app)
+        try:
+            with patch("backend.pipeline_runner.retrieve_dify_knowledge_cards", AsyncMock(return_value={
+                "configured": False,
+                "query": "",
+                "cards": [],
+                "error": "dify_not_configured",
+            })):
+                with patch(
+                    "backend.pipeline_runner.call_n8n_agent",
+                    AsyncMock(return_value=N8nAgentCallResult(ok=True, decision=decision, raw_response=decision.model_dump(mode="json"), status_code=200)),
+                ):
+                    response = client.post(
+                        "/api/agent-pipelines/50/smoke-auto-reply",
+                        json={"conversation_id": 150, "messages": ["что дальше?"]},
+                    )
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["verdict"], "BLOCKED")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["policy_issues"], ["decision_not_approved"])
+
     def test_agent_pipeline_crud_and_campaign_assignment(self):
         app = FastAPI()
         app.include_router(agent_pipelines_router.router)

@@ -18,7 +18,7 @@ from backend.n8n_workspace import (
     production_webhook_url,
     workflow_editor_url,
 )
-from backend.pipeline_runner import replay_pipeline_for_conversation
+from backend.pipeline_runner import replay_pipeline_for_conversation, smoke_pipeline_for_conversation
 
 router = APIRouter(prefix="/api/agent-pipelines", tags=["agent-pipelines"])
 
@@ -45,6 +45,12 @@ class PipelineUpdate(BaseModel):
 
 class PipelineReplayRequest(BaseModel):
     conversation_id: int
+    dry_run_tools: bool = True
+
+
+class PipelineSmokeAutoReplyRequest(BaseModel):
+    conversation_id: int
+    messages: list[str] = Field(default_factory=list)
     dry_run_tools: bool = True
 
 
@@ -254,6 +260,34 @@ def _validate_smoke_result(call_result) -> dict[str, Any]:
     }
 
 
+def _smoke_verdict(result: dict[str, Any]) -> dict[str, Any]:
+    policy = result.get("policy") or {}
+    issues = policy.get("issues") or []
+    if result.get("ok") and result.get("reply_text"):
+        verdict = "SEND"
+    elif issues:
+        verdict = "BLOCKED"
+    elif result.get("error"):
+        verdict = "ERROR"
+    else:
+        verdict = "NO_REPLY"
+    return {
+        "verdict": verdict,
+        "ok": verdict == "SEND",
+        "engine": result.get("engine"),
+        "pipeline_id": result.get("pipeline_id"),
+        "pipeline_name": result.get("pipeline_name"),
+        "event_id": result.get("event_id"),
+        "reply_text": result.get("reply_text"),
+        "reply_preview": (result.get("reply_text") or "")[:240],
+        "policy_issues": issues,
+        "error": result.get("error"),
+        "decision": result.get("decision"),
+        "conversation_state": result.get("conversation_state"),
+        "raw": result,
+    }
+
+
 @router.get("/")
 def list_pipelines(project_id: Optional[int] = None, db: Session = Depends(get_db)):
     q = db.query(AgentPipeline)
@@ -342,6 +376,54 @@ async def replay_pipeline(pipeline_id: int, data: PipelineReplayRequest, db: Ses
         messages=messages,
         dry_run_tools=data.dry_run_tools,
     )
+
+
+@router.post("/{pipeline_id}/smoke-auto-reply")
+async def smoke_auto_reply(pipeline_id: int, data: PipelineSmokeAutoReplyRequest, db: Session = Depends(get_db)):
+    pipeline = db.query(AgentPipeline).filter(AgentPipeline.id == pipeline_id).first()
+    if not pipeline:
+        raise HTTPException(404, "Pipeline not found")
+    conversation = db.query(Conversation).filter(Conversation.id == data.conversation_id).first()
+    if not conversation:
+        raise HTTPException(404, "Conversation not found")
+    clean_messages = [message.strip() for message in data.messages if message and message.strip()]
+    if not clean_messages:
+        raise HTTPException(400, "At least one synthetic user message is required")
+
+    history = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.asc(), Message.id.asc())
+        .all()
+    )
+    last_id = max([message.id or 0 for message in history] or [0])
+    synthetic_messages = [
+        Message(
+            id=last_id + index + 1,
+            conversation_id=conversation.id,
+            role="user",
+            text=text,
+            created_at=datetime.utcnow(),
+        )
+        for index, text in enumerate(clean_messages)
+    ]
+    result = await smoke_pipeline_for_conversation(
+        db,
+        pipeline=pipeline,
+        conversation=conversation,
+        messages=[*history, *synthetic_messages],
+        dry_run_tools=data.dry_run_tools,
+    )
+    verdict = _smoke_verdict(result)
+    verdict.update(
+        {
+            "conversation_id": conversation.id,
+            "synthetic_messages": clean_messages,
+            "history_messages_count": len(history),
+            "dry_run_tools": data.dry_run_tools,
+        }
+    )
+    return verdict
 
 
 @router.post("/n8n/workflows")
