@@ -1513,6 +1513,61 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(result.decision.reply_text, "Это короткий тестовый ответ.")
         self.assertEqual(result.decision.reason, "draft_response")
 
+    def test_n8n_adapter_accepts_output_with_booking_result_wrapper(self):
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "output": {
+                        "reply_text": "Назначил встречу на 09.05.2026, 15:00-15:40 МСК.",
+                        "next_action": "booking_success",
+                    },
+                    "booking_result": {
+                        "ok": True,
+                        "booking_id": "4",
+                        "start_at": "2026-05-09T15:00:00+03:00",
+                        "duration_minutes": 40,
+                        "calendar_event_id": "calendar-event-1",
+                        "calendar_add_url": "https://calendar.google.com/calendar/render?action=TEMPLATE",
+                        "zoom_meeting_id": "83274689727",
+                        "zoom_join_url": "https://zoom.us/j/83274689727",
+                    },
+                    "reason": "Booking Agent created Google Calendar event and Zoom meeting.",
+                }
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def post(self, *args, **kwargs):
+                return FakeResponse()
+
+        request = N8nAgentRequest(
+            event_id="test:booking-wrapper",
+            mode="sandbox",
+            conversation={"id": 1},
+            messages=[],
+        )
+        with patch("backend.n8n_agent.httpx.AsyncClient", FakeClient):
+            result = asyncio.run(call_n8n_agent(request, webhook_url="https://example.test/webhook"))
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.decision.approved)
+        self.assertEqual(result.decision.stage, "scheduling")
+        self.assertEqual(result.decision.ops_action, "create_booking")
+        self.assertEqual(result.decision.booking.start_at, "2026-05-09T15:00:00+03:00")
+        self.assertEqual(result.decision.model_dump(mode="json")["booking"]["calendar_event_id"], "calendar-event-1")
+
     def test_agent_pipeline_crud_and_campaign_assignment(self):
         app = FastAPI()
         app.include_router(agent_pipelines_router.router)

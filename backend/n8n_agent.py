@@ -90,6 +90,10 @@ def _normalize_n8n_decision_payload(raw: Any) -> Any:
     if not isinstance(raw, dict):
         return raw
 
+    booking_decision = _normalize_booking_wrapper(raw)
+    if booking_decision:
+        return booking_decision
+
     for wrapper_key in ("decision", "output", "response", "result", "data"):
         nested = raw.get(wrapper_key)
         if isinstance(nested, dict):
@@ -121,6 +125,59 @@ def _normalize_n8n_decision_payload(raw: Any) -> Any:
         "booking": raw.get("booking") or draft.get("booking") or {},
         "risk_flags": raw.get("risk_flags") or draft.get("risk_flags") or [],
         "reason": _first_non_empty_text(raw.get("reason"), draft.get("reason")) or "draft_response",
+    }
+
+
+def _normalize_booking_wrapper(raw: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Accept current n8n shape: {output: {reply_text}, booking_result: {...}}."""
+
+    booking = raw.get("booking_result")
+    if not isinstance(booking, dict) or not booking.get("ok"):
+        return None
+
+    output = raw.get("output") if isinstance(raw.get("output"), dict) else {}
+    reply_text = _first_non_empty_text(
+        output.get("reply_text"),
+        output.get("body"),
+        output.get("text"),
+        raw.get("reply_text"),
+        raw.get("body"),
+        raw.get("text"),
+    )
+    if not reply_text:
+        return None
+
+    if "approved" in output:
+        approved = output.get("approved")
+    elif "approved" in raw:
+        approved = raw.get("approved")
+    else:
+        approved = True
+
+    duration = booking.get("duration_minutes") or output.get("duration_minutes") or 30
+    return {
+        **output,
+        "approved": approved,
+        "stage": output.get("stage") or raw.get("stage") or "scheduling",
+        "intent": output.get("intent") or raw.get("intent") or "availability_offer",
+        "reply_text": reply_text,
+        "ops_action": output.get("ops_action") or raw.get("ops_action") or "create_booking",
+        "reminder": output.get("reminder") or raw.get("reminder") or {},
+        "booking": output.get("booking")
+        or raw.get("booking")
+        or {
+            "start_at": booking.get("start_at"),
+            "duration_minutes": int(duration or 30),
+            "attendee_email": booking.get("attendee_email") or None,
+            "calendar_event_id": booking.get("calendar_event_id"),
+            "calendar_html_link": booking.get("calendar_html_link"),
+            "calendar_add_url": booking.get("calendar_add_url"),
+            "zoom_meeting_id": booking.get("zoom_meeting_id"),
+            "zoom_join_url": booking.get("zoom_join_url"),
+            "external_booking_id": booking.get("booking_id"),
+        },
+        "risk_flags": output.get("risk_flags") or raw.get("risk_flags") or [],
+        "reason": _first_non_empty_text(output.get("reason"), raw.get("reason")) or "booking_result",
     }
 
 
