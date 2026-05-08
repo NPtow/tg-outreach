@@ -1795,6 +1795,7 @@ class OutreachRuntimeTests(unittest.TestCase):
             )
             db.add(Conversation(id=149, account_id=49, tg_user_id="749", status="active"))
             db.add(Message(id=1491, conversation_id=149, role="assistant", text="Когда удобно созвониться?"))
+            db.add(Message(id=1492, conversation_id=149, role="user", text="Старое неотвеченное сообщение"))
             db.commit()
 
         captured_request = None
@@ -1841,11 +1842,14 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["verdict"], "SEND")
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["synthetic_messages"], ["Завтра в 15", "И пришли ссылку"])
+        self.assertEqual(payload["history_messages_count"], 2)
+        self.assertEqual(payload["smoke_history_messages_count"], 1)
         self.assertEqual([item["text"] for item in captured_request.messages[-2:]], ["Завтра в 15", "И пришли ссылку"])
+        self.assertNotIn("Старое неотвеченное сообщение", [item["text"] for item in captured_request.messages])
         self.assertEqual([item["text"] for item in captured_request.conversation_state["latest_user_messages"]], ["Завтра в 15", "И пришли ссылку"])
         with self._db() as db:
             persisted = db.query(Message).filter(Message.conversation_id == 149).all()
-        self.assertEqual(len(persisted), 1)
+        self.assertEqual(len(persisted), 2)
 
     def test_agent_pipeline_smoke_auto_reply_returns_blocked_verdict(self):
         app = FastAPI()

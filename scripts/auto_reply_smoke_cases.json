@@ -4,7 +4,8 @@
     "pipeline_id": 2,
     "conversation_id": 6,
     "expected_verdict": "SEND",
-    "dry_run_tools": true
+    "dry_run_tools": true,
+    "replace_latest_user_batch": true
   },
   "cases": [
     {

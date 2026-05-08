@@ -52,6 +52,7 @@ class PipelineSmokeAutoReplyRequest(BaseModel):
     conversation_id: int
     messages: list[str] = Field(default_factory=list)
     dry_run_tools: bool = True
+    replace_latest_user_batch: bool = True
 
 
 class N8nWorkspaceRequest(BaseModel):
@@ -288,6 +289,18 @@ def _smoke_verdict(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _without_latest_user_batch(messages: list[Message]) -> list[Message]:
+    remove_from = len(messages)
+    for index in range(len(messages) - 1, -1, -1):
+        role = (getattr(messages[index], "role", "") or "").strip()
+        if role == "assistant":
+            remove_from = index + 1
+            break
+        if role != "user":
+            remove_from = index
+    return messages[:remove_from]
+
+
 @router.get("/")
 def list_pipelines(project_id: Optional[int] = None, db: Session = Depends(get_db)):
     q = db.query(AgentPipeline)
@@ -396,6 +409,7 @@ async def smoke_auto_reply(pipeline_id: int, data: PipelineSmokeAutoReplyRequest
         .order_by(Message.created_at.asc(), Message.id.asc())
         .all()
     )
+    history_for_smoke = _without_latest_user_batch(history) if data.replace_latest_user_batch else history
     last_id = max([message.id or 0 for message in history] or [0])
     synthetic_messages = [
         Message(
@@ -411,7 +425,7 @@ async def smoke_auto_reply(pipeline_id: int, data: PipelineSmokeAutoReplyRequest
         db,
         pipeline=pipeline,
         conversation=conversation,
-        messages=[*history, *synthetic_messages],
+        messages=[*history_for_smoke, *synthetic_messages],
         dry_run_tools=data.dry_run_tools,
     )
     verdict = _smoke_verdict(result)
@@ -420,7 +434,9 @@ async def smoke_auto_reply(pipeline_id: int, data: PipelineSmokeAutoReplyRequest
             "conversation_id": conversation.id,
             "synthetic_messages": clean_messages,
             "history_messages_count": len(history),
+            "smoke_history_messages_count": len(history_for_smoke),
             "dry_run_tools": data.dry_run_tools,
+            "replace_latest_user_batch": data.replace_latest_user_batch,
         }
     )
     return verdict

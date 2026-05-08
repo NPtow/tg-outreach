@@ -60,6 +60,7 @@ def _run_case(case: dict, defaults: dict, *, args) -> dict:
     expected = str(_case_value(case, defaults, "expected_verdict", "SEND")).upper()
     messages = case.get("messages") or []
     dry_run_tools = bool(_case_value(case, defaults, "dry_run_tools", True))
+    replace_latest_user_batch = bool(_case_value(case, defaults, "replace_latest_user_batch", True))
     if not base_url:
         raise ValueError("base_url is required")
     if not messages:
@@ -73,6 +74,7 @@ def _run_case(case: dict, defaults: dict, *, args) -> dict:
             "conversation_id": conversation_id,
             "messages": messages,
             "dry_run_tools": dry_run_tools,
+            "replace_latest_user_batch": replace_latest_user_batch,
         },
         timeout_s=args.timeout,
     )
