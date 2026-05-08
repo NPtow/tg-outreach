@@ -58,6 +58,7 @@ class N8nAgentRequest(BaseModel):
     mode: N8nMode = "sandbox"
     conversation: dict[str, Any]
     messages: list[dict[str, Any]]
+    conversation_state: dict[str, Any] = Field(default_factory=dict)
     scenario_cards: list[dict[str, Any]] = Field(default_factory=list)
     knowledge_cards: list[dict[str, Any]] = Field(default_factory=list)
     settings: dict[str, Any] = Field(default_factory=dict)
@@ -132,7 +133,7 @@ def _normalize_booking_wrapper(raw: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Accept current n8n shape: {output: {reply_text}, booking_result: {...}}."""
 
     booking = raw.get("booking_result")
-    if not isinstance(booking, dict) or not booking.get("ok"):
+    if not isinstance(booking, dict):
         return None
 
     output = raw.get("output") if isinstance(raw.get("output"), dict) else {}
@@ -147,6 +148,11 @@ def _normalize_booking_wrapper(raw: dict[str, Any]) -> Optional[dict[str, Any]]:
     if not reply_text:
         return None
 
+    booking_ok = bool(booking.get("ok"))
+    booking_status = str(booking.get("status") or "").strip().lower()
+    if not booking_ok and booking_status != "busy":
+        return None
+
     if "approved" in output:
         approved = output.get("approved")
     elif "approved" in raw:
@@ -155,18 +161,19 @@ def _normalize_booking_wrapper(raw: dict[str, Any]) -> Optional[dict[str, Any]]:
         approved = True
 
     duration = booking.get("duration_minutes") or output.get("duration_minutes") or 30
+    ops_action = output.get("ops_action") or raw.get("ops_action") or ("create_booking" if booking_ok else "none")
     return {
         **output,
         "approved": approved,
         "stage": output.get("stage") or raw.get("stage") or "scheduling",
         "intent": output.get("intent") or raw.get("intent") or "availability_offer",
         "reply_text": reply_text,
-        "ops_action": output.get("ops_action") or raw.get("ops_action") or "create_booking",
+        "ops_action": ops_action,
         "reminder": output.get("reminder") or raw.get("reminder") or {},
         "booking": output.get("booking")
         or raw.get("booking")
         or {
-            "start_at": booking.get("start_at"),
+            "start_at": booking.get("start_at") if booking_ok else None,
             "duration_minutes": int(duration or 30),
             "attendee_email": booking.get("attendee_email") or None,
             "calendar_event_id": booking.get("calendar_event_id"),

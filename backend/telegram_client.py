@@ -1138,6 +1138,24 @@ async def _run_scheduled_auto_reply(
         if remaining_delay_s:
             await asyncio.sleep(remaining_delay_s)
 
+        db = SessionLocal()
+        try:
+            latest_user_message_id = _latest_user_message_id(db, conversation_id)
+        finally:
+            db.close()
+        if latest_user_message_id != trigger_message_id:
+            _log_auto_reply_event(
+                "skipped",
+                account_id=account_id,
+                conversation_id=conversation_id,
+                trigger_message_id=trigger_message_id,
+                latest_user_message_id=latest_user_message_id,
+                reason="stale_after_generation",
+                scheduled_at=scheduled_at,
+                skipped_at=_utcnow(),
+            )
+            return
+
         sending_at = _utcnow()
         _log_auto_reply_event(
             "sending",

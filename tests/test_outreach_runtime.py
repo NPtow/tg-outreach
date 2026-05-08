@@ -870,6 +870,47 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertIn("вернусь со ссылкой", sent_text)
         self.assertNotIn(BOOK_MEETING_MARKER, sent_text)
 
+    def test_run_scheduled_auto_reply_skips_if_new_user_message_arrives_after_generation(self):
+        with self._db() as db:
+            db.add(
+                Account(
+                    id=30,
+                    name="Ana",
+                    phone="+573122997130",
+                    app_id="2040",
+                    app_hash="hash",
+                    auto_reply=True,
+                )
+            )
+            db.add(Settings(id=1, provider="openai", auto_reply_enabled=True, openai_key="sk-test", model="gpt-4o-mini"))
+            db.add(Conversation(id=130, account_id=30, tg_user_id="430", tg_username="lead_user_30", status="active"))
+            db.add(Message(conversation_id=130, role="user", text="Первое сообщение"))
+            db.commit()
+            trigger_id = db.query(Message).filter(Message.conversation_id == 130).first().id
+
+        async def add_new_user_message(db, conversation_id, reply):
+            db.add(Message(conversation_id=conversation_id, role="user", text="Второе сообщение"))
+            db.commit()
+            return reply, None
+
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch("backend.telegram_client.asyncio.sleep", AsyncMock()):
+                with patch("backend.gpt_handler.generate_reply", AsyncMock(return_value="Ответ на первое сообщение")):
+                    with patch("backend.telegram_client.maybe_book_meeting_from_reply", AsyncMock(side_effect=add_new_user_message)):
+                        with patch("backend.telegram_client.send_manual_message", AsyncMock(return_value={"ok": True})) as send:
+                            asyncio.run(
+                                tg._run_scheduled_auto_reply(
+                                    account_id=30,
+                                    conversation_id=130,
+                                    tg_user_id="430",
+                                    trigger_message_id=trigger_id,
+                                    delay_s=7.0,
+                                    scheduled_at=tg._utcnow(),
+                                )
+                            )
+
+        send.assert_not_awaited()
+
     def test_record_agent_run_persists_redacted_json(self):
         with self._db() as db:
             run = record_agent_run(
@@ -1567,6 +1608,169 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(result.decision.ops_action, "create_booking")
         self.assertEqual(result.decision.booking.start_at, "2026-05-09T15:00:00+03:00")
         self.assertEqual(result.decision.model_dump(mode="json")["booking"]["calendar_event_id"], "calendar-event-1")
+
+    def test_n8n_adapter_accepts_busy_booking_wrapper_as_approved_reply(self):
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "output": {
+                        "reply_text": "Этот слот уже занят. Могу предложить: 09.05 16:00-16:40 МСК.",
+                        "next_action": "ask_slot",
+                    },
+                    "booking_result": {
+                        "ok": False,
+                        "status": "busy",
+                        "alternatives": ["09.05 16:00-16:40 МСК"],
+                    },
+                    "reason": "Booking Agent did not create a meeting.",
+                }
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def post(self, *args, **kwargs):
+                return FakeResponse()
+
+        request = N8nAgentRequest(
+            event_id="test:busy-booking-wrapper",
+            mode="sandbox",
+            conversation={"id": 1},
+            messages=[],
+        )
+        with patch("backend.n8n_agent.httpx.AsyncClient", FakeClient):
+            result = asyncio.run(call_n8n_agent(request, webhook_url="https://example.test/webhook"))
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.decision.approved)
+        self.assertEqual(result.decision.stage, "scheduling")
+        self.assertEqual(result.decision.intent, "availability_offer")
+        self.assertEqual(result.decision.ops_action, "none")
+        self.assertIn("Этот слот уже занят", result.decision.reply_text)
+
+    def test_pipeline_answers_existing_meeting_status_without_calling_n8n(self):
+        with self._db() as db:
+            pipeline = AgentPipeline(
+                id=47,
+                name="n8n staging",
+                type="n8n_webhook",
+                status="active",
+                config_json=json.dumps({"mode": "live", "webhook_url": "https://n8n.test/webhook"}),
+            )
+            conversation = Conversation(id=147, account_id=47, tg_user_id="747", status="active")
+            user_message = Message(
+                id=1471,
+                conversation_id=147,
+                role="user",
+                text="ну и что там по встрече?",
+                created_at=datetime(2026, 5, 8, 17, 6, tzinfo=ZoneInfo("Europe/Moscow")),
+            )
+            db.add(pipeline)
+            db.add(conversation)
+            db.add(user_message)
+            db.add(
+                ScheduledMeeting(
+                    conversation_id=147,
+                    status="scheduled",
+                    scheduled_start=datetime(2026, 5, 9, 15, 0, tzinfo=ZoneInfo("Europe/Moscow")),
+                    scheduled_end=datetime(2026, 5, 9, 15, 40, tzinfo=ZoneInfo("Europe/Moscow")),
+                    timezone="Europe/Moscow",
+                    calendar_add_url="https://calendar.google.com/calendar/render?action=TEMPLATE",
+                    zoom_join_url="https://zoom.us/j/123456789",
+                )
+            )
+            db.commit()
+
+            with patch("backend.pipeline_runner.call_n8n_agent", AsyncMock()) as n8n_call:
+                result = asyncio.run(
+                    run_pipeline_for_auto_reply(
+                        db,
+                        pipeline=pipeline,
+                        conversation=conversation,
+                        messages=[user_message],
+                        trigger_message_id=1471,
+                    )
+                )
+
+            runs = db.query(AgentRun).filter(AgentRun.conversation_id == 147).all()
+
+        n8n_call.assert_not_called()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["engine"], "conversation_state_guard")
+        self.assertIn("09.05.2026", result["reply_text"])
+        self.assertIn("https://zoom.us/j/123456789", result["reply_text"])
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].status, "succeeded")
+
+    def test_pipeline_request_includes_latest_user_message_batch(self):
+        captured_request = None
+
+        async def fake_call(request, **kwargs):
+            nonlocal captured_request
+            captured_request = request
+            return N8nAgentCallResult(
+                ok=True,
+                decision=N8nAgentDecision(
+                    approved=True,
+                    stage="qualification",
+                    intent="other",
+                    reply_text="Да, понял. Уточню по встрече.",
+                ),
+                raw_response={"draft": {"body": "Да, понял. Уточню по встрече."}},
+                status_code=200,
+            )
+
+        with self._db() as db:
+            pipeline = AgentPipeline(
+                id=48,
+                name="n8n staging",
+                type="n8n_webhook",
+                status="active",
+                config_json=json.dumps({"mode": "live", "webhook_url": "https://n8n.test/webhook"}),
+            )
+            conversation = Conversation(id=1480, account_id=48, tg_user_id="748", status="active")
+            messages = [
+                Message(id=1481, conversation_id=1480, role="assistant", text="Когда удобно созвониться?"),
+                Message(id=1482, conversation_id=1480, role="user", text="Завтра в 15"),
+                Message(id=1483, conversation_id=1480, role="user", text="И пришли ссылку"),
+            ]
+            db.add(pipeline)
+            db.add(conversation)
+            db.add_all(messages)
+            db.commit()
+
+            with patch("backend.pipeline_runner.retrieve_dify_knowledge_cards", AsyncMock(return_value={
+                "configured": False,
+                "query": "",
+                "cards": [],
+                "error": "dify_not_configured",
+            })):
+                with patch("backend.pipeline_runner.call_n8n_agent", fake_call):
+                    result = asyncio.run(
+                        run_pipeline_for_auto_reply(
+                            db,
+                            pipeline=pipeline,
+                            conversation=conversation,
+                            messages=messages,
+                            trigger_message_id=1483,
+                        )
+                    )
+
+        self.assertTrue(result["ok"])
+        self.assertIsNotNone(captured_request)
+        latest_user_messages = captured_request.conversation_state["latest_user_messages"]
+        self.assertEqual([item["text"] for item in latest_user_messages], ["Завтра в 15", "И пришли ссылку"])
 
     def test_agent_pipeline_crud_and_campaign_assignment(self):
         app = FastAPI()

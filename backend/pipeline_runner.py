@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Iterable, Optional
 
 from sqlalchemy.orm import Session
@@ -9,11 +10,21 @@ from sqlalchemy.orm import Session
 from backend.agent_policy import validate_agent_decision
 from backend.agent_runtime import record_agent_run
 from backend.dify_retriever import retrieve_dify_knowledge_cards
+from backend.meeting_scheduler import build_meeting_reply_text, get_existing_scheduled_meeting
 from backend.models import Account, AgentPipeline, Campaign, Conversation, Message
 from backend.n8n_agent import N8nAgentRequest, call_n8n_agent
 from backend.scenarios import active_scenarios_for_text
 
 _URL_RE = re.compile(r"https?://\S+")
+_MEETING_WORD_RE = re.compile(r"(встреч|созвон|звон|zoom|зум|календар|ссылк)", re.IGNORECASE)
+_MEETING_STATUS_RE = re.compile(
+    r"(что там|где|когда|назнач|постав|получ|подтверд|верно|актуальн|скин|пришл)",
+    re.IGNORECASE,
+)
+_SLOT_HINT_RE = re.compile(
+    r"(\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s*(час|ч)\b|сегодня|завтра|послезавтра|понедельник|вторник|сред|четверг|пятниц|суббот|воскрес)",
+    re.IGNORECASE,
+)
 
 
 def resolve_agent_pipeline(
@@ -141,6 +152,50 @@ async def _run_pipeline(
         )
         return result
     message_payloads = [_message_payload(message) for message in messages]
+    conversation_state = build_conversation_state(db, conversation, message_payloads)
+    guarded_reply = _reply_from_conversation_state_guard(conversation_state)
+    if guarded_reply:
+        decision = {
+            "approved": True,
+            "stage": "scheduling",
+            "intent": "availability_offer",
+            "reply_text": guarded_reply,
+            "ops_action": "none",
+            "booking": conversation_state.get("scheduled_meeting") or {},
+            "reason": "existing_meeting_status_guard",
+        }
+        policy = validate_agent_decision(decision, booking_record_exists=True, recent_messages=message_payloads)
+        result = {
+            "ok": bool(policy["safe_to_send"]),
+            "engine": "conversation_state_guard",
+            "pipeline_id": pipeline.id,
+            "pipeline_name": pipeline.name,
+            "event_id": event_id,
+            "mode": mode,
+            "conversation_state": conversation_state,
+            "decision": decision,
+            "policy": policy,
+            "reply_text": policy.get("final_reply_text"),
+            "would_send": bool(not dry_run_tools and policy["safe_to_send"]),
+        }
+        record_agent_run(
+            db,
+            conversation_id=conversation.id,
+            run_type=run_type,
+            model="conversation_state_guard",
+            input_payload={
+                "pipeline_id": pipeline.id,
+                "event_id": event_id,
+                "mode": mode,
+                "messages": message_payloads,
+                "conversation_state": conversation_state,
+            },
+            output_payload=result,
+            status="succeeded" if result["ok"] else "blocked",
+            error=None,
+        )
+        return result
+
     scenario_cards = _scenario_payloads(db, message_payloads, project_id=conversation.project_id)
     knowledge = await retrieve_dify_knowledge_cards(
         _dify_retrieval_query(message_payloads),
@@ -152,6 +207,7 @@ async def _run_pipeline(
         mode=config_mode if mode == "live" else mode,
         conversation=_conversation_payload(conversation),
         messages=message_payloads,
+        conversation_state=conversation_state,
         scenario_cards=scenario_cards,
         knowledge_cards=knowledge_cards,
         settings={
@@ -304,6 +360,96 @@ def _compact_retrieval_text(text: str, *, limit: int) -> str:
     compact = _URL_RE.sub("[link]", text or "")
     compact = " ".join(compact.split())
     return compact[:limit]
+
+
+def build_conversation_state(db: Session, conversation: Conversation, messages: list[dict]) -> dict:
+    latest_user_messages = _latest_user_messages_after_last_assistant(messages)
+    latest_user_text = "\n".join(item.get("text") or "" for item in latest_user_messages).strip()
+    scheduled_meeting = get_existing_scheduled_meeting(db, conversation.id)
+    serialized_meeting = _serialize_meeting_for_state(scheduled_meeting) if scheduled_meeting else None
+    if serialized_meeting:
+        meeting_state = "scheduled"
+    elif _SLOT_HINT_RE.search(latest_user_text):
+        meeting_state = "slot_requested"
+    else:
+        meeting_state = "none"
+
+    return {
+        "qualification_state": "qualified" if meeting_state in {"slot_requested", "scheduled"} else "unknown",
+        "meeting_state": meeting_state,
+        "scheduled_meeting": serialized_meeting,
+        "latest_user_messages": latest_user_messages,
+        "latest_user_text": latest_user_text,
+        "latest_user_message_count": len(latest_user_messages),
+    }
+
+
+def _latest_user_messages_after_last_assistant(messages: list[dict]) -> list[dict]:
+    latest: list[dict] = []
+    for message in reversed(messages):
+        role = (message.get("role") or "").strip()
+        if role == "assistant":
+            break
+        if role == "user":
+            latest.append(message)
+    return list(reversed(latest))
+
+
+def _reply_from_conversation_state_guard(conversation_state: dict) -> str:
+    if conversation_state.get("meeting_state") != "scheduled":
+        return ""
+    latest_text = conversation_state.get("latest_user_text") or ""
+    if not (_MEETING_WORD_RE.search(latest_text) and _MEETING_STATUS_RE.search(latest_text)):
+        return ""
+    meeting = conversation_state.get("scheduled_meeting") or {}
+    return meeting.get("status_reply") or meeting.get("reply_text") or ""
+
+
+def _serialize_meeting_for_state(meeting) -> dict:
+    reply_text = build_meeting_reply_text(
+        meeting.scheduled_start,
+        meeting.scheduled_end,
+        meeting.zoom_join_url,
+        meeting.calendar_html_link,
+        meeting.calendar_add_url,
+    )
+    return {
+        "id": meeting.id,
+        "status": meeting.status,
+        "start_at": _iso_or_none(meeting.scheduled_start),
+        "end_at": _iso_or_none(meeting.scheduled_end),
+        "timezone": meeting.timezone,
+        "calendar_event_id": meeting.calendar_event_id,
+        "calendar_html_link": meeting.calendar_html_link,
+        "calendar_add_url": meeting.calendar_add_url,
+        "zoom_meeting_id": meeting.zoom_meeting_id,
+        "zoom_join_url": meeting.zoom_join_url,
+        "reply_text": reply_text,
+        "status_reply": _meeting_status_reply_text(meeting),
+    }
+
+
+def _meeting_status_reply_text(meeting) -> str:
+    slot = ""
+    if isinstance(meeting.scheduled_start, datetime) and isinstance(meeting.scheduled_end, datetime):
+        slot = build_meeting_reply_text(meeting.scheduled_start, meeting.scheduled_end, None)
+        slot = (
+            slot.replace("Забронировал встречу на ", "")
+            .replace("Поставил встречу на ", "")
+            .rstrip(".")
+        )
+    parts = [f"Встреча уже назначена на {slot}." if slot else "Встреча уже назначена."]
+    if meeting.zoom_join_url:
+        parts.append(f"Ссылка Zoom: {meeting.zoom_join_url}")
+    elif meeting.calendar_add_url:
+        parts.append(f"Ссылка для добавления в календарь: {meeting.calendar_add_url}")
+    elif meeting.calendar_html_link:
+        parts.append(f"Ссылка на событие в календаре: {meeting.calendar_html_link}")
+    return " ".join(parts).strip()
+
+
+def _iso_or_none(value) -> Optional[str]:
+    return value.isoformat() if hasattr(value, "isoformat") else None
 
 
 def _scenario_payloads(db: Session, messages: list[dict], limit: int = 5, project_id: int | None = None) -> list[dict]:
