@@ -420,6 +420,7 @@ export default function Accounts() {
   const [reconnecting, setReconnecting] = useState({});
   const [reconnectError, setReconnectError] = useState({});
   const [proxyTesting, setProxyTesting] = useState({});
+  const [savingSession, setSavingSession] = useState({});
 
   const load = () => Promise.all([
     api.getAccounts().then(setAccounts),
@@ -459,6 +460,20 @@ export default function Accounts() {
       load();
     } finally {
       setProxyTesting((s) => ({ ...s, [accId]: false }));
+    }
+  };
+
+  const handleSaveSession = async (accId) => {
+    setSavingSession((s) => ({ ...s, [accId]: true }));
+    setReconnectError((e) => ({ ...e, [accId]: null }));
+    try {
+      await api.saveSession(accId);
+      await load();
+    } catch (e) {
+      setReconnectError((r) => ({ ...r, [accId]: e.message }));
+      await load();
+    } finally {
+      setSavingSession((s) => ({ ...s, [accId]: false }));
     }
   };
 
@@ -564,8 +579,13 @@ export default function Accounts() {
                         {reconnecting[acc.id] ? "Подключаю..." : "Reconnect"}
                       </button>
                     )}
-                    <button onClick={() => api.saveSession(acc.id).then(load)} className="text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-300 px-3 py-1.5 rounded-lg font-medium transition-colors">
-                      Save Session
+                    <button
+                      onClick={() => handleSaveSession(acc.id)}
+                      disabled={savingSession[acc.id] || acc.needs_reauth || acc.session_state === "missing" || acc.session_state === "expired"}
+                      title="Сохраняет текущую Telegram session в БД. Для missing/expired/reauth сначала нужен Re-auth."
+                      className="text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-300 px-3 py-1.5 rounded-lg font-medium transition-colors disabled:opacity-50"
+                    >
+                      {savingSession[acc.id] ? "Сохраняю..." : "Save Session"}
                     </button>
                     <button onClick={() => setEditAccount(acc)} className="text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-300 px-3 py-1.5 rounded-lg font-medium transition-colors">
                       Edit

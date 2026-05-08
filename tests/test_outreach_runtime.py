@@ -2826,6 +2826,23 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "Telegram-клиент не подключён")
         self.assertEqual(payload["eligibility_state"], "blocked_runtime")
 
+    def test_save_session_attempts_reconnect_when_client_missing(self):
+        fake_client = object()
+
+        async def fake_reconnect(account_id, requested_by="system"):
+            self.assertEqual(account_id, 55)
+            self.assertEqual(requested_by, "save-session")
+            tg._clients[55] = fake_client
+            return {"ok": True}
+
+        with patch.dict(tg._clients, {}, clear=True):
+            with patch("backend.telegram_client.reconnect_account_runtime", fake_reconnect):
+                with patch("backend.telegram_client._save_session_string", AsyncMock()) as save:
+                    result = asyncio.run(tg.save_session_now(55))
+
+        self.assertTrue(result)
+        save.assert_awaited_once_with(55, fake_client)
+
     def test_unblock_forwards_to_worker_when_runtime_is_split(self):
         with self._db() as db:
             db.add(Account(name="Ana", phone="+1", app_id="2040", app_hash="hash"))

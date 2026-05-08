@@ -572,6 +572,9 @@ async def save_session_now(account_id: int) -> bool:
     """Explicitly flush the current in-memory session to DB. Called from /save-session endpoint."""
     client = _clients.get(account_id)
     if not client:
+        await reconnect_account_runtime(account_id, requested_by="save-session")
+        client = _clients.get(account_id)
+    if not client:
         return False
     await _save_session_string(account_id, client)
     logger.info(f"Session saved for account {account_id}")
