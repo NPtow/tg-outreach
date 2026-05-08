@@ -61,8 +61,6 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 DEFAULT_API_ID = 2040
 DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
-AUTO_REPLY_DELAY_MIN_S = 20.0
-AUTO_REPLY_DELAY_MAX_S = 45.0
 CAMPAIGN_ENTITY_TIMEOUT_S = 20.0
 CAMPAIGN_SEND_TIMEOUT_S = 30.0
 
@@ -752,34 +750,15 @@ def _auto_reply_delay_seconds(
     task_type: Optional[str] = None,
     jitter: Optional[float] = None,
 ) -> float:
-    resolved_type = task_type or _classify_auto_reply_task_type(inbound_text, reply_text)
-    windows = {
-        "clarification": (12.0, 25.0),
-        "trust": (20.0, 45.0),
-        "scheduling": (12.0, 25.0),
-        "booking": (25.0, 60.0),
-    }
-    low, high = windows.get(resolved_type, (AUTO_REPLY_DELAY_MIN_S, AUTO_REPLY_DELAY_MAX_S))
-    factor = random.random() if jitter is None else max(0.0, min(1.0, float(jitter)))
-    inbound_adjustment = min(20.0, len(inbound_text or "") * 0.03)
-    delay = low + ((high - low) * factor) + inbound_adjustment
-    return min(90.0, delay)
+    return 0.0
 
 
 def _typing_duration_seconds(reply_text: str = "") -> float:
-    return max(3.0, min(18.0, len(reply_text or "") / 14.0))
+    return 0.0
 
 
 def _presence_timing(delay_s: float) -> dict:
-    if delay_s <= 0:
-        return {"read_delay_s": 0.0, "initial_typing_delay_s": 0.0, "initial_typing_s": 0.0}
-    read_delay = min(10.0, max(2.0, delay_s * 0.2))
-    typing_at = min(10.0, max(read_delay, delay_s * 0.35))
-    return {
-        "read_delay_s": read_delay,
-        "initial_typing_delay_s": max(0.0, typing_at - read_delay),
-        "initial_typing_s": 1.5,
-    }
+    return {"read_delay_s": 0.0, "initial_typing_delay_s": 0.0, "initial_typing_s": 0.0}
 
 
 async def _mark_auto_reply_read(account_id: int, tg_user_id: str) -> bool:
@@ -1082,7 +1061,7 @@ async def _run_scheduled_auto_reply(
             return
 
         resolved_task_type = task_type or _classify_auto_reply_task_type(latest_inbound_text, reply)
-        final_delay_s = delay_s
+        final_delay_s = 0.0
         typing_duration_s = _typing_duration_seconds(reply)
 
         db = SessionLocal()
@@ -1133,7 +1112,8 @@ async def _run_scheduled_auto_reply(
             + presence["initial_typing_s"]
             + typing_duration_s
         )
-        await _show_auto_reply_typing(account_id, tg_user_id, duration_s=typing_duration_s)
+        if typing_duration_s:
+            await _show_auto_reply_typing(account_id, tg_user_id, duration_s=typing_duration_s)
         remaining_delay_s = max(0.0, final_delay_s - elapsed_presence_s)
         if remaining_delay_s:
             await asyncio.sleep(remaining_delay_s)

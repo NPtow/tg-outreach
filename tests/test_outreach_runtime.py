@@ -340,7 +340,7 @@ class OutreachRuntimeTests(unittest.TestCase):
 
         self.assertEqual(campaign.status, "paused")
 
-    def test_auto_reply_delay_depends_on_task_and_message_lengths(self):
+    def test_auto_reply_delay_is_disabled_for_immediate_send(self):
         short = tg._auto_reply_delay_seconds(
             inbound_text="Что это?",
             reply_text="Коротко: это исследование.",
@@ -360,10 +360,9 @@ class OutreachRuntimeTests(unittest.TestCase):
             jitter=0,
         )
 
-        self.assertGreaterEqual(short, 12)
-        self.assertLess(short, booking)
-        self.assertGreater(long_inbound, short)
-        self.assertLessEqual(booking, 90)
+        self.assertEqual(short, 0.0)
+        self.assertEqual(booking, 0.0)
+        self.assertEqual(long_inbound, 0.0)
 
     def test_auto_reply_presence_marks_read_and_shows_typing(self):
         client = FakePresenceClient()
@@ -3613,11 +3612,10 @@ class OutreachRuntimeTests(unittest.TestCase):
             return new_task
 
         tg._pending_auto_reply_tasks[122] = old_task
-        with patch("backend.telegram_client._auto_reply_delay_seconds", return_value=12.5):
-            with patch("backend.telegram_client.asyncio.create_task", side_effect=fake_create_task):
-                delay = tg._schedule_auto_reply(22, 122, "422", 777)
+        with patch("backend.telegram_client.asyncio.create_task", side_effect=fake_create_task):
+            delay = tg._schedule_auto_reply(22, 122, "422", 777)
 
-        self.assertEqual(delay, 12.5)
+        self.assertEqual(delay, 0.0)
         self.assertTrue(old_task.cancelled)
         self.assertIs(tg._pending_auto_reply_tasks[122], new_task)
 
@@ -3630,10 +3628,11 @@ class OutreachRuntimeTests(unittest.TestCase):
 
         self.assertEqual(quick_type, "trust")
         self.assertEqual(scheduling_type, "booking")
-        self.assertGreater(long_delay, quick_delay)
-        self.assertLessEqual(scheduling_delay, 90)
+        self.assertEqual(quick_delay, 0.0)
+        self.assertEqual(long_delay, 0.0)
+        self.assertEqual(scheduling_delay, 0.0)
 
-    def test_run_scheduled_auto_reply_waits_then_generates_and_sends(self):
+    def test_run_scheduled_auto_reply_generates_and_sends_without_artificial_sleep(self):
         with self._db() as db:
             db.add(
                 Account(
@@ -3676,12 +3675,7 @@ class OutreachRuntimeTests(unittest.TestCase):
                             )
                         )
 
-        sleep_values = [call.args[0] for call in sleep.await_args_list]
-        self.assertAlmostEqual(sleep_values[0], 3.4)
-        self.assertAlmostEqual(sleep_values[1], 2.55)
-        self.assertIn(1.5, sleep_values)
-        self.assertIn(3.0, sleep_values)
-        self.assertAlmostEqual(sleep_values[-1], 6.55)
+        sleep.assert_not_awaited()
         generate.assert_awaited_once()
         send.assert_awaited_once_with(23, "423", 123, "Конечно, расскажу.")
 
