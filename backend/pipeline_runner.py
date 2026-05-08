@@ -458,13 +458,13 @@ def _meeting_status_reply_text(meeting) -> str:
             .replace("Поставил встречу на ", "")
             .rstrip(".")
         )
-    parts = [f"Встреча уже назначена на {slot}." if slot else "Встреча уже назначена."]
+    parts = [f"Да, всё стоит на {slot}." if slot else "Да, встреча уже стоит."]
     if meeting.zoom_join_url:
-        parts.append(f"Ссылка Zoom: {meeting.zoom_join_url}")
+        parts.append(f"Zoom: {meeting.zoom_join_url}")
     elif meeting.calendar_add_url:
-        parts.append(f"Ссылка для добавления в календарь: {meeting.calendar_add_url}")
+        parts.append(f"Ссылка: {meeting.calendar_add_url}")
     elif meeting.calendar_html_link:
-        parts.append(f"Ссылка на событие в календаре: {meeting.calendar_html_link}")
+        parts.append(f"Ссылка: {meeting.calendar_html_link}")
     return " ".join(parts).strip()
 
 

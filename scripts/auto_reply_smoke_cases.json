@@ -32,6 +32,36 @@
       "name": "chat_6_postpone",
       "description": "Проверяет перенос без жесткого отказа.",
       "messages": ["я позже вернусь по времени"]
+    },
+    {
+      "name": "prompt_opener_what_can_i_help",
+      "description": "Короткий ответ на простой вопрос без негативного фрейминга про оплату/сервис.",
+      "conversation_id": 8,
+      "messages": ["Привет! Чем могу быть полезен?"],
+      "expected": "SEND",
+      "max_chars": 130,
+      "forbidden_phrases": ["без оплаты", "готового сервиса", "денег", "услуги не предоставляем"],
+      "required_phrases_any": ["интервью", "созвон"]
+    },
+    {
+      "name": "prompt_missing_company_size_only",
+      "description": "Если известна роль, но не размер компании, агент спрашивает только недостающий факт.",
+      "conversation_id": 8,
+      "messages": ["Работаю в МТС рекрутером"],
+      "expected": "SEND",
+      "max_chars": 100,
+      "forbidden_phrases": ["без оплаты", "готового сервиса", "подойдёте ли вы"],
+      "required_phrases_any": ["сколько", "человек"]
+    },
+    {
+      "name": "prompt_qualified_short_next_step",
+      "description": "После квалификации агент коротко переводит к созвону без механического пересказа фактов.",
+      "conversation_id": 8,
+      "messages": ["Работаю в МТС рекрутером", "200"],
+      "expected": "SEND",
+      "max_chars": 130,
+      "forbidden_phrases": ["раз вы рекрутер", "работаете в компании", "готового сервиса", "без оплаты"],
+      "required_phrases_any": ["когда удобно", "созвониться", "20–30", "20-30"]
     }
   ]
 }

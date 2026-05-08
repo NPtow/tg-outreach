@@ -57,7 +57,7 @@ def _run_case(case: dict, defaults: dict, *, args) -> dict:
     base_url = (args.base_url or os.getenv("TG_OUTREACH_SMOKE_BASE_URL") or _case_value(case, defaults, "base_url", "")).rstrip("/")
     pipeline_id = int(args.pipeline_id or _case_value(case, defaults, "pipeline_id"))
     conversation_id = int(args.conversation_id or _case_value(case, defaults, "conversation_id"))
-    expected = str(_case_value(case, defaults, "expected_verdict", "SEND")).upper()
+    expected = str(case.get("expected") or _case_value(case, defaults, "expected_verdict", "SEND")).upper()
     messages = case.get("messages") or []
     dry_run_tools = bool(_case_value(case, defaults, "dry_run_tools", True))
     replace_latest_user_batch = bool(_case_value(case, defaults, "replace_latest_user_batch", True))
@@ -80,7 +80,15 @@ def _run_case(case: dict, defaults: dict, *, args) -> dict:
     )
     duration_ms = int((time.monotonic() - started) * 1000)
     verdict = str(payload.get("verdict") or ("ERROR" if status_code != 200 else "NO_REPLY")).upper()
-    passed = status_code == 200 and verdict == expected
+    reply = str(
+        payload.get("reply")
+        or payload.get("reply_text")
+        or payload.get("final_reply_text")
+        or payload.get("reply_preview")
+        or ""
+    )
+    assertion_errors = _quality_assertion_errors(reply, case)
+    passed = status_code == 200 and verdict == expected and not assertion_errors
     return {
         "name": case.get("name") or "ad_hoc",
         "description": case.get("description") or "",
@@ -93,10 +101,29 @@ def _run_case(case: dict, defaults: dict, *, args) -> dict:
         "conversation_id": conversation_id,
         "messages": messages,
         "reply_preview": payload.get("reply_preview") or "",
+        "reply": reply,
         "policy_issues": payload.get("policy_issues") or [],
+        "assertion_errors": assertion_errors,
         "error": payload.get("error") or payload.get("detail") or "",
         "payload": payload,
     }
+
+
+def _quality_assertion_errors(reply: str, case: dict) -> list[str]:
+    errors: list[str] = []
+    max_chars = case.get("max_chars")
+    if max_chars is not None and len(reply) > int(max_chars):
+        errors.append(f"reply length {len(reply)} > max_chars {max_chars}")
+
+    lower_reply = reply.lower()
+    for phrase in case.get("forbidden_phrases") or []:
+        if str(phrase).lower() in lower_reply:
+            errors.append(f"forbidden phrase found: {phrase}")
+
+    required_any = case.get("required_phrases_any") or []
+    if required_any and not any(str(phrase).lower() in lower_reply for phrase in required_any):
+        errors.append(f"none of required phrases found: {required_any}")
+    return errors
 
 
 def _print_result(result: dict) -> None:
@@ -109,6 +136,8 @@ def _print_result(result: dict) -> None:
     )
     if result["reply_preview"]:
         print(f"  reply: {result['reply_preview']}")
+    for error in result.get("assertion_errors") or []:
+        print(f"  assertion: {error}")
     if result["error"]:
         print(f"  error: {result['error']}")
 
@@ -150,7 +179,9 @@ def main(argv: list[str]) -> int:
                 "status_code": 0,
                 "duration_ms": 0,
                 "policy_issues": [],
+                "assertion_errors": [],
                 "reply_preview": "",
+                "reply": "",
                 "error": str(exc),
                 "payload": {},
             }

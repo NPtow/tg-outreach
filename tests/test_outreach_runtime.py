@@ -1707,6 +1707,7 @@ class OutreachRuntimeTests(unittest.TestCase):
         n8n_call.assert_not_called()
         self.assertTrue(result["ok"])
         self.assertEqual(result["engine"], "conversation_state_guard")
+        self.assertIn("Да, всё стоит", result["reply_text"])
         self.assertIn("09.05.2026", result["reply_text"])
         self.assertIn("https://zoom.us/j/123456789", result["reply_text"])
         self.assertEqual(len(runs), 1)
