@@ -890,6 +890,11 @@ async def _mark_auto_reply_read(account_id: int, tg_user_id: str) -> bool:
         return False
     try:
         await client.send_read_acknowledge(int(tg_user_id))
+    except Exception as exc:
+        _log_auto_reply_event("read_failed", account_id=account_id, tg_user_id=tg_user_id, reason=str(exc))
+        return False
+
+    try:
         db = SessionLocal()
         try:
             conv = db.query(Conversation).filter(
@@ -908,11 +913,13 @@ async def _mark_auto_reply_read(account_id: int, tg_user_id: str) -> bool:
                 db.commit()
         finally:
             db.close()
+    except Exception as exc:
+        _log_auto_reply_event("read_state_update_failed", account_id=account_id, tg_user_id=tg_user_id, reason=str(exc))
+    try:
         _log_auto_reply_event("read", account_id=account_id, tg_user_id=tg_user_id, read_at=_utcnow())
-        return True
     except Exception as exc:
         _log_auto_reply_event("read_failed", account_id=account_id, tg_user_id=tg_user_id, reason=str(exc))
-        return False
+    return True
 
 
 async def _show_auto_reply_typing(account_id: int, tg_user_id: str, *, duration_s: float) -> bool:
