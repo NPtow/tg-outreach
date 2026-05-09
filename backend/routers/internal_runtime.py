@@ -82,3 +82,8 @@ async def start_campaign(campaign_id: int):
 async def pause_campaign(campaign_id: int):
     await tg.stop_campaign(campaign_id)
     return {"ok": True}
+
+
+@router.post("/campaigns/{campaign_id}/refresh", dependencies=[Depends(require_worker_token)])
+async def refresh_campaign(campaign_id: int):
+    return await tg.refresh_campaign_runtime(campaign_id)

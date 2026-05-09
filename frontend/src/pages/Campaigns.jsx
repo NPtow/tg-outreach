@@ -474,6 +474,7 @@ export default function Campaigns({ projectId }) {
   const [pipelines, setPipelines] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [startErrors, setStartErrors] = useState({});
+  const [limitEdit, setLimitEdit] = useState({ id: null, value: "", saving: false });
   const load = () => api.getCampaigns(projectId).then(setCampaigns);
 
   useEffect(() => {
@@ -509,6 +510,24 @@ export default function Campaigns({ projectId }) {
   const handlePause = async id => { await api.pauseCampaign(id); load(); };
   const handleRetry = async id => { await api.retryFailed(id).catch(e => alert(e.message)); load(); };
   const handleDelete = async id => { if (!confirm("Удалить кампанию?")) return; await api.deleteCampaign(id); load(); };
+  const handleEditLimit = (campaign) => setLimitEdit({ id: campaign.id, value: String(campaign.daily_limit || 20), saving: false });
+  const handleSaveLimit = async (campaign) => {
+    const nextLimit = Number(limitEdit.value);
+    if (!Number.isFinite(nextLimit) || nextLimit < 1) {
+      setStartErrors((prev) => ({ ...prev, [campaign.id]: "Лимит должен быть числом больше 0" }));
+      return;
+    }
+    setLimitEdit((prev) => ({ ...prev, saving: true }));
+    try {
+      await api.updateCampaign(campaign.id, { daily_limit: Math.floor(nextLimit) });
+      setStartErrors((prev) => ({ ...prev, [campaign.id]: null }));
+      setLimitEdit({ id: null, value: "", saving: false });
+      load();
+    } catch (e) {
+      setStartErrors((prev) => ({ ...prev, [campaign.id]: e.message }));
+      setLimitEdit((prev) => ({ ...prev, saving: false }));
+    }
+  };
 
   const accountName = (ids) => {
     if (!ids || ids.length === 0) return "—";
@@ -563,6 +582,35 @@ export default function Campaigns({ projectId }) {
                         {accountName(c.account_ids)} · {c.delay_min}–{c.delay_max}с · {c.daily_limit}/день
                         {c.send_window_enabled && ` · ${c.send_hour_from}:00–${c.send_hour_to}:00 MSK`}
                       </p>
+                      {limitEdit.id === c.id ? (
+                        <div className="mt-2 flex items-center gap-2">
+                          <input
+                            type="number"
+                            min="1"
+                            className="w-24 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-blue-500"
+                            value={limitEdit.value}
+                            onChange={(event) => setLimitEdit((prev) => ({ ...prev, value: event.target.value }))}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") handleSaveLimit(c);
+                              if (event.key === "Escape") setLimitEdit({ id: null, value: "", saving: false });
+                            }}
+                            autoFocus
+                          />
+                          <button
+                            onClick={() => handleSaveLimit(c)}
+                            disabled={limitEdit.saving}
+                            className="rounded-lg bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                          >
+                            {limitEdit.saving ? "Сохраняю..." : "Сохранить"}
+                          </button>
+                          <button
+                            onClick={() => setLimitEdit({ id: null, value: "", saving: false })}
+                            className="rounded-lg px-2 py-1 text-xs text-zinc-500 hover:text-zinc-300"
+                          >
+                            Отмена
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 ${st.cls}`}>{st.label}</span>
                   </div>
@@ -585,6 +633,9 @@ export default function Campaigns({ projectId }) {
                         ↺ Retry ({c.failed})
                       </button>
                     )}
+                    <button onClick={() => handleEditLimit(c)} className="text-xs text-zinc-500 hover:text-blue-300 transition-colors px-2 py-1.5">
+                      Лимит
+                    </button>
                     <button onClick={() => handleDelete(c.id)} className="text-xs text-zinc-600 hover:text-red-400 transition-colors px-2 py-1.5">
                       Удалить
                     </button>

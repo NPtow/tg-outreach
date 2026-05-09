@@ -2246,6 +2246,87 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual([c["name"] for c in campaigns_b.json()], ["Project B campaign"])
         self.assertEqual(campaigns_a.json()[0]["project_id"], 10)
 
+    def test_update_campaign_daily_limit(self):
+        app = FastAPI()
+        app.include_router(campaigns_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(Account(id=406, name="Ana", phone="+573122997406", app_id="2040", app_hash="hash"))
+            db.add(
+                Campaign(
+                    id=406,
+                    name="Editable campaign",
+                    account_id=406,
+                    account_ids="[406]",
+                    messages='["hi"]',
+                    daily_limit=20,
+                    status="draft",
+                )
+            )
+            db.commit()
+
+        client = TestClient(app)
+        try:
+            response = client.patch("/api/campaigns/406", json={"daily_limit": 45})
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["daily_limit"], 45)
+        with self._db() as db:
+            campaign = db.query(Campaign).filter(Campaign.id == 406).first()
+            self.assertEqual(campaign.daily_limit, 45)
+
+    def test_update_running_campaign_refreshes_worker_runtime(self):
+        app = FastAPI()
+        app.include_router(campaigns_router.router)
+
+        def override_get_db():
+            db = self.Session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        with self._db() as db:
+            db.add(Account(id=407, name="Ana", phone="+573122997407", app_id="2040", app_hash="hash"))
+            db.add(
+                Campaign(
+                    id=407,
+                    name="Running campaign",
+                    account_id=407,
+                    account_ids="[407]",
+                    messages='["hi"]',
+                    daily_limit=20,
+                    status="running",
+                )
+            )
+            db.commit()
+
+        client = TestClient(app)
+        try:
+            with patch("backend.routers.campaigns.owns_telegram_runtime", return_value=False):
+                with patch("backend.routers.campaigns.forward_to_worker", AsyncMock(return_value={"ok": True, "restarted": True})) as forward:
+                    response = client.patch("/api/campaigns/407", json={"daily_limit": 55})
+        finally:
+            client.close()
+            app.dependency_overrides.clear()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["daily_limit"], 55)
+        self.assertEqual(response.json()["runtime"], {"ok": True, "restarted": True})
+        forward.assert_awaited_once_with("POST", "/internal/runtime/campaigns/407/refresh")
+
     def test_delete_campaign_detaches_conversations_and_removes_targets(self):
         app = FastAPI()
         app.include_router(campaigns_router.router)

@@ -2228,6 +2228,17 @@ async def start_campaign(campaign_id: int):
     _campaign_tasks[campaign_id] = task
 
 
+async def refresh_campaign_runtime(campaign_id: int) -> dict:
+    if not campaign_is_running(campaign_id):
+        return {"ok": True, "restarted": False}
+    task = _campaign_tasks.pop(campaign_id, None)
+    if task:
+        task.cancel()
+    new_task = asyncio.create_task(_campaign_worker(campaign_id))
+    _campaign_tasks[campaign_id] = new_task
+    return {"ok": True, "restarted": True}
+
+
 async def stop_campaign(campaign_id: int):
     task = _campaign_tasks.pop(campaign_id, None)
     if task:
@@ -2597,4 +2608,5 @@ async def _campaign_worker(campaign_id: int):
         _pause_campaign_after_worker_error(campaign_id, str(e))
         logger.error(f"Campaign {campaign_id} worker error: {e}", exc_info=True)
     finally:
-        _campaign_tasks.pop(campaign_id, None)
+        if _campaign_tasks.get(campaign_id) is asyncio.current_task():
+            _campaign_tasks.pop(campaign_id, None)

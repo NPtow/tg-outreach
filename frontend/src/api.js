@@ -134,6 +134,7 @@ export const api = {
   // Campaigns
   getCampaigns: (projectId) => req("GET", withProject("/api/campaigns/", projectId)),
   createCampaign: (data) => req("POST", "/api/campaigns/", data),
+  updateCampaign: (id, data) => req("PATCH", `/api/campaigns/${id}`, data),
   startCampaign: (id) => req("POST", `/api/campaigns/${id}/start`),
   pauseCampaign: (id) => req("POST", `/api/campaigns/${id}/pause`),
   retryFailed: (id) => req("POST", `/api/campaigns/${id}/retry-failed`),

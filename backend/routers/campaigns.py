@@ -38,6 +38,20 @@ class CampaignCreate(BaseModel):
     max_messages: Optional[int] = None
 
 
+class CampaignUpdate(BaseModel):
+    name: Optional[str] = None
+    delay_min: Optional[int] = None
+    delay_max: Optional[int] = None
+    daily_limit: Optional[int] = None
+    send_hour_from: Optional[int] = None
+    send_hour_to: Optional[int] = None
+    send_window_enabled: Optional[bool] = None
+    stop_on_reply: Optional[bool] = None
+    stop_keywords: Optional[str] = None
+    hot_keywords: Optional[str] = None
+    max_messages: Optional[int] = None
+
+
 def _pipeline_config(pipeline: AgentPipeline) -> dict[str, Any]:
     try:
         return json.loads(pipeline.config_json or "{}")
@@ -170,6 +184,59 @@ def create_campaign(data: CampaignCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(c)
     return {"id": c.id, "name": c.name}
+
+
+@router.patch("/{campaign_id}")
+async def update_campaign(campaign_id: int, data: CampaignUpdate, db: Session = Depends(get_db)):
+    c = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not c:
+        raise HTTPException(404, "Campaign not found")
+
+    payload = data.model_dump(exclude_unset=True)
+    int_fields = ("delay_min", "delay_max", "daily_limit", "send_hour_from", "send_hour_to", "max_messages")
+    for field in int_fields:
+        if field in payload and payload[field] is not None:
+            payload[field] = int(payload[field])
+
+    if "daily_limit" in payload and payload["daily_limit"] is not None and payload["daily_limit"] < 1:
+        raise HTTPException(400, "daily_limit must be greater than 0")
+    if "delay_min" in payload and payload["delay_min"] is not None and payload["delay_min"] < 0:
+        raise HTTPException(400, "delay_min must be greater than or equal to 0")
+    if "delay_max" in payload and payload["delay_max"] is not None and payload["delay_max"] < 0:
+        raise HTTPException(400, "delay_max must be greater than or equal to 0")
+    next_delay_min = payload.get("delay_min", c.delay_min)
+    next_delay_max = payload.get("delay_max", c.delay_max)
+    if next_delay_min is not None and next_delay_max is not None and int(next_delay_min) > int(next_delay_max):
+        raise HTTPException(400, "delay_min cannot be greater than delay_max")
+    for field in ("send_hour_from", "send_hour_to"):
+        if field in payload and payload[field] is not None and not (0 <= payload[field] <= 23):
+            raise HTTPException(400, f"{field} must be between 0 and 23")
+
+    for field, value in payload.items():
+        if field == "name" and value is not None:
+            value = value.strip()
+            if not value:
+                raise HTTPException(400, "Campaign name cannot be empty")
+        setattr(c, field, value)
+
+    was_running = c.status == "running"
+    db.commit()
+    db.refresh(c)
+
+    runtime = {"ok": True, "restarted": False}
+    if was_running:
+        if owns_telegram_runtime():
+            runtime = await tg.refresh_campaign_runtime(campaign_id)
+        else:
+            runtime = await forward_to_worker("POST", f"/internal/runtime/campaigns/{campaign_id}/refresh")
+
+    return {
+        "ok": True,
+        "id": c.id,
+        "daily_limit": c.daily_limit,
+        "status": c.status,
+        "runtime": runtime,
+    }
 
 
 @router.post("/{campaign_id}/start")
