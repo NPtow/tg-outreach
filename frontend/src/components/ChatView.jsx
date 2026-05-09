@@ -14,8 +14,25 @@ function Bubble({ msg }) {
         <p className="whitespace-pre-wrap">{msg.text}</p>
         <p className={`mt-1.5 text-[10px] ${isUser ? "text-zinc-500" : "text-sky-100/80"}`}>
           {new Date(msg.created_at).toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" })}
+          {!isUser ? (
+            <span className="ml-2">
+              {msg.read_state === "read" ? "✓✓ прочитано" : "✓ отправлено"}
+            </span>
+          ) : null}
+          {isUser && msg.read_state === "read_by_us" ? <span className="ml-2">прочитано нами</span> : null}
         </p>
       </div>
+    </div>
+  );
+}
+
+function HeaderAvatar({ name, src }) {
+  if (src) {
+    return <img src={src} alt={name || "Telegram profile"} className="h-11 w-11 shrink-0 rounded-2xl object-cover" />;
+  }
+  return (
+    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-sky-600 text-sm font-semibold text-white">
+      {(name || "?").slice(0, 2).toUpperCase()}
     </div>
   );
 }
@@ -67,14 +84,20 @@ export default function ChatView({ convId, onClose, onStatusChange }) {
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-white/8 bg-white/[0.03] px-5 py-4">
-        <div className="min-w-0">
-          <p className="truncate text-base font-semibold text-zinc-100">{name}</p>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-            {conv.tg_username ? <span>@{conv.tg_username}</span> : null}
-            {conv.source_campaign_name ? (
-              <span className="rounded-full border border-sky-400/15 bg-sky-400/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-sky-200">
-                {conv.source_campaign_name}
-              </span>
+        <div className="flex min-w-0 items-start gap-3">
+          <HeaderAvatar name={name} src={conv.tg_avatar_url} />
+          <div className="min-w-0">
+            <p className="truncate text-base font-semibold text-zinc-100">{name}</p>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+              {conv.tg_username ? <span>@{conv.tg_username}</span> : null}
+              {conv.source_campaign_name ? (
+                <span className="rounded-full border border-sky-400/15 bg-sky-400/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-sky-200">
+                  {conv.source_campaign_name}
+                </span>
+              ) : null}
+            </div>
+            {conv.tg_bio ? (
+              <p className="mt-2 line-clamp-2 max-w-2xl text-xs leading-5 text-zinc-400">{conv.tg_bio}</p>
             ) : null}
           </div>
         </div>

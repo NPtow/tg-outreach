@@ -13,6 +13,19 @@ import backend.telegram_client as tg
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
 
+def _avatar_data_url(conv: Conversation) -> str:
+    if not conv.tg_photo_base64:
+        return ""
+    mime = conv.tg_photo_mime or "image/jpeg"
+    return f"data:{mime};base64,{conv.tg_photo_base64}"
+
+
+def _message_read_state(message: Message) -> str:
+    if message.role == "assistant":
+        return "read" if message.telegram_read_at else "sent"
+    return "read_by_us" if message.telegram_read_by_us_at else "unread"
+
+
 class SendMessageRequest(BaseModel):
     text: str
 
@@ -68,6 +81,11 @@ def list_conversations(
             "tg_username": c.tg_username,
             "tg_first_name": c.tg_first_name,
             "tg_last_name": c.tg_last_name,
+            "tg_bio": c.tg_bio or "",
+            "tg_avatar_url": _avatar_data_url(c),
+            "tg_profile_updated_at": c.tg_profile_updated_at,
+            "outbox_read_max_id": c.outbox_read_max_id,
+            "inbox_read_max_id": c.inbox_read_max_id,
             "status": c.status,
             "last_message": c.last_message,
             "last_message_at": c.last_message_at,
@@ -85,6 +103,10 @@ def get_messages(conv_id: int, db: Session = Depends(get_db)):
     conv = db.query(Conversation).filter(Conversation.id == conv_id).first()
     if not conv:
         raise HTTPException(404, "Conversation not found")
+    campaign_name = None
+    if conv.source_campaign_id:
+        camp = db.query(Campaign).filter(Campaign.id == conv.source_campaign_id).first()
+        campaign_name = camp.name if camp else None
     messages = db.query(Message).filter(
         Message.conversation_id == conv_id
     ).order_by(Message.created_at.asc()).all()
@@ -95,14 +117,30 @@ def get_messages(conv_id: int, db: Session = Depends(get_db)):
             "tg_username": conv.tg_username,
             "tg_first_name": conv.tg_first_name,
             "tg_last_name": conv.tg_last_name,
+            "tg_bio": conv.tg_bio or "",
+            "tg_avatar_url": _avatar_data_url(conv),
+            "tg_profile_updated_at": conv.tg_profile_updated_at,
+            "outbox_read_max_id": conv.outbox_read_max_id,
+            "inbox_read_max_id": conv.inbox_read_max_id,
             "status": conv.status,
             "account_id": conv.account_id,
             "tg_user_id": conv.tg_user_id,
             "source_campaign_id": conv.source_campaign_id,
+            "source_campaign_name": campaign_name,
             "is_hot": bool(conv.is_hot),
         },
         "messages": [
-            {"id": m.id, "role": m.role, "text": m.text, "created_at": m.created_at}
+            {
+                "id": m.id,
+                "role": m.role,
+                "text": m.text,
+                "created_at": m.created_at,
+                "tg_message_id": m.tg_message_id,
+                "is_outgoing": bool(m.is_outgoing),
+                "read_state": _message_read_state(m),
+                "telegram_read_at": m.telegram_read_at,
+                "telegram_read_by_us_at": m.telegram_read_by_us_at,
+            }
             for m in messages
         ],
     }

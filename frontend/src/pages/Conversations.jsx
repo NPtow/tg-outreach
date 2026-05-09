@@ -10,10 +10,19 @@ const STATUS = {
   done: { cls: "bg-zinc-700/50 text-zinc-300 ring-zinc-600/20", label: "Done" },
 };
 
-function Avatar({ name }) {
+function Avatar({ name, src }) {
   const initials = name ? name.split(" ").map((word) => word[0]).join("").slice(0, 2).toUpperCase() : "?";
   const colors = ["bg-sky-600", "bg-violet-600", "bg-pink-600", "bg-emerald-600", "bg-amber-600", "bg-cyan-600"];
   const color = colors[name?.charCodeAt(0) % colors.length] || "bg-zinc-600";
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt={name || "Telegram profile"}
+        className="h-10 w-10 shrink-0 rounded-2xl object-cover shadow-[0_12px_30px_rgba(0,0,0,0.28)]"
+      />
+    );
+  }
   return (
     <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl ${color} text-xs font-semibold text-white shadow-[0_12px_30px_rgba(0,0,0,0.28)]`}>
       {initials}
@@ -193,7 +202,7 @@ export default function Conversations({ projectId }) {
                       }`}
                     >
                       <div className="relative">
-                        <Avatar name={name} />
+                        <Avatar name={name} src={conversation.tg_avatar_url} />
                         {conversation.is_hot ? <span className="absolute -right-1 -top-1 text-[11px]">🔥</span> : null}
                       </div>
                       <div className="min-w-0 flex-1">

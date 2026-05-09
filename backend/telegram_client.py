@@ -29,6 +29,7 @@ from telethon.errors import (
     UserDeactivatedBanError,
 )
 from telethon.sessions import StringSession
+from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import User
 
 from backend.database import SessionLocal
@@ -722,15 +723,137 @@ def _record_outreach_message(
     role: str,
     text: str,
     increment_unread: bool = False,
+    tg_message_id: Optional[int] = None,
+    is_outgoing: Optional[bool] = None,
 ) -> Message:
+    if tg_message_id is not None:
+        existing = db.query(Message).filter(
+            Message.conversation_id == conversation.id,
+            Message.tg_message_id == int(tg_message_id),
+        ).first()
+        if existing:
+            conversation.last_message = existing.text
+            conversation.last_message_at = existing.created_at
+            return existing
+
     if increment_unread:
         conversation.unread_count = (conversation.unread_count or 0) + 1
-    message = Message(conversation_id=conversation.id, role=role, text=text)
+    message = Message(
+        conversation_id=conversation.id,
+        role=role,
+        text=text,
+        tg_message_id=int(tg_message_id) if tg_message_id is not None else None,
+        is_outgoing=bool(is_outgoing if is_outgoing is not None else role == "assistant"),
+    )
     db.add(message)
     db.flush()
     conversation.last_message = text
     conversation.last_message_at = _utcnow()
     return message
+
+
+def _should_refresh_profile(conv: Conversation, max_age_hours: int = 168) -> bool:
+    if not conv.tg_profile_updated_at:
+        return True
+    try:
+        return (_utcnow() - conv.tg_profile_updated_at).total_seconds() > max_age_hours * 3600
+    except Exception:
+        return True
+
+
+async def _sync_conversation_profile(client, conv: Conversation, entity) -> bool:
+    if not _should_refresh_profile(conv):
+        return False
+
+    changed = False
+    username = getattr(entity, "username", None) or ""
+    first_name = getattr(entity, "first_name", None) or ""
+    last_name = getattr(entity, "last_name", None) or ""
+
+    if username and conv.tg_username != username:
+        conv.tg_username = username
+        changed = True
+    if first_name and conv.tg_first_name != first_name:
+        conv.tg_first_name = first_name
+        changed = True
+    if last_name and conv.tg_last_name != last_name:
+        conv.tg_last_name = last_name
+        changed = True
+
+    try:
+        full = await client(GetFullUserRequest(entity))
+        about = getattr(getattr(full, "full_user", None), "about", None) or ""
+        if about and conv.tg_bio != about:
+            conv.tg_bio = about
+            changed = True
+    except Exception as exc:
+        logger.info("telegram_profile_bio_sync_failed conversation_id=%s reason=%s", conv.id, exc)
+
+    try:
+        photo_bytes = await client.download_profile_photo(entity, bytes)
+        if photo_bytes:
+            encoded = base64.b64encode(photo_bytes).decode("ascii")
+            if conv.tg_photo_base64 != encoded:
+                conv.tg_photo_base64 = encoded
+                conv.tg_photo_mime = "image/jpeg"
+                changed = True
+    except Exception as exc:
+        logger.info("telegram_profile_photo_sync_failed conversation_id=%s reason=%s", conv.id, exc)
+
+    conv.tg_profile_updated_at = _utcnow()
+    return changed
+
+
+def _apply_read_state(
+    db,
+    conv: Conversation,
+    *,
+    max_id: Optional[int],
+    message_ids: list[int],
+    inbox: bool,
+) -> int:
+    now = _utcnow()
+    ids = [int(value) for value in (message_ids or []) if value is not None]
+    normalized_max_id = int(max_id) if max_id else None
+
+    if inbox:
+        if normalized_max_id:
+            conv.inbox_read_max_id = max(normalized_max_id, int(conv.inbox_read_max_id or 0))
+        query = db.query(Message).filter(
+            Message.conversation_id == conv.id,
+            Message.role == "user",
+            Message.tg_message_id.isnot(None),
+            Message.telegram_read_by_us_at.is_(None),
+        )
+        if normalized_max_id:
+            query = query.filter(Message.tg_message_id <= normalized_max_id)
+        elif ids:
+            query = query.filter(Message.tg_message_id.in_(ids))
+        else:
+            return 0
+        messages = query.all()
+        for msg in messages:
+            msg.telegram_read_by_us_at = now
+        return len(messages)
+
+    if normalized_max_id:
+        conv.outbox_read_max_id = max(normalized_max_id, int(conv.outbox_read_max_id or 0))
+    query = db.query(Message).filter(
+        Message.conversation_id == conv.id,
+        Message.role == "assistant",
+        Message.tg_message_id.isnot(None),
+        Message.telegram_read_at.is_(None),
+    )
+    if normalized_max_id:
+        query = query.filter(Message.tg_message_id <= normalized_max_id)
+    elif ids:
+        query = query.filter(Message.tg_message_id.in_(ids))
+    else:
+        return 0
+    messages = query.all()
+    for msg in messages:
+        msg.telegram_read_at = now
+    return len(messages)
 
 
 def _classify_auto_reply_task_type(inbound_text: str = "", reply_text: str = "") -> str:
@@ -767,6 +890,24 @@ async def _mark_auto_reply_read(account_id: int, tg_user_id: str) -> bool:
         return False
     try:
         await client.send_read_acknowledge(int(tg_user_id))
+        db = SessionLocal()
+        try:
+            conv = db.query(Conversation).filter(
+                Conversation.account_id == account_id,
+                Conversation.tg_user_id == str(tg_user_id),
+            ).first()
+            if conv:
+                messages = db.query(Message).filter(
+                    Message.conversation_id == conv.id,
+                    Message.role == "user",
+                    Message.telegram_read_by_us_at.is_(None),
+                ).all()
+                now = _utcnow()
+                for msg in messages:
+                    msg.telegram_read_by_us_at = now
+                db.commit()
+        finally:
+            db.close()
         _log_auto_reply_event("read", account_id=account_id, tg_user_id=tg_user_id, read_at=_utcnow())
         return True
     except Exception as exc:
@@ -1196,7 +1337,9 @@ async def _run_scheduled_auto_reply(
 
 
 async def _handle_message(account_id: int, event):
-    if getattr(event, "is_out", None) or getattr(getattr(event, "message", None), "out", False):
+    is_outgoing = bool(getattr(event, "is_out", None) or getattr(getattr(event, "message", None), "out", False))
+    if is_outgoing:
+        await _handle_outgoing_message(account_id, event)
         return
     sender: User = await event.get_sender()
     if not sender or sender.bot:
@@ -1242,6 +1385,9 @@ async def _handle_message(account_id: int, event):
             tg_last_name=sender.last_name or "",
             source_campaign_id=source_campaign_id,
         )
+        client = _clients.get(account_id)
+        if client:
+            await _sync_conversation_profile(client, conv, sender)
 
         # Load source campaign for stop conditions
         source_campaign = None
@@ -1251,7 +1397,15 @@ async def _handle_message(account_id: int, event):
             ).first()
 
         # ── Save incoming message ──
-        incoming_message = _record_outreach_message(db, conversation=conv, role="user", text=text, increment_unread=True)
+        incoming_message = _record_outreach_message(
+            db,
+            conversation=conv,
+            role="user",
+            text=text,
+            increment_unread=True,
+            tg_message_id=getattr(event.message, "id", None),
+            is_outgoing=False,
+        )
 
         # ── Check stop keywords ──
         if source_campaign and source_campaign.stop_keywords:
@@ -1330,6 +1484,99 @@ async def _handle_message(account_id: int, event):
         )
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)
+    finally:
+        db.close()
+
+
+async def _handle_outgoing_message(account_id: int, event):
+    message = getattr(event, "message", None)
+    if not message:
+        return
+    text = message.text or ""
+    if not text.strip():
+        return
+
+    db = SessionLocal()
+    try:
+        peer = await event.get_chat()
+        if not peer or getattr(peer, "bot", False):
+            return
+
+        tg_user_id = str(getattr(peer, "id", "") or "")
+        if not tg_user_id:
+            return
+
+        conv = db.query(Conversation).filter(
+            Conversation.account_id == account_id,
+            Conversation.tg_user_id == tg_user_id,
+        ).first()
+        if conv is None:
+            username = getattr(peer, "username", None) or None
+            source_campaign_id = _find_source_campaign(db, account_id, username) if username else None
+            if not source_campaign_id:
+                logger.info("Ignoring non-outreach outgoing chat for account %s to %s", account_id, tg_user_id)
+                return
+            conv = _ensure_outreach_conversation(
+                db,
+                account_id=account_id,
+                tg_user_id=tg_user_id,
+                tg_username=username,
+                tg_first_name=getattr(peer, "first_name", "") or "",
+                tg_last_name=getattr(peer, "last_name", "") or "",
+                source_campaign_id=source_campaign_id,
+            )
+        client = _clients.get(account_id)
+        if client:
+            await _sync_conversation_profile(client, conv, peer)
+
+        _record_outreach_message(
+            db,
+            conversation=conv,
+            role="assistant",
+            text=text,
+            tg_message_id=getattr(message, "id", None),
+            is_outgoing=True,
+        )
+        conv.unread_count = 0
+        db.commit()
+        await _broadcast_conversation_message(conv, text)
+    except Exception as exc:
+        logger.error("Error handling outgoing message: %s", exc, exc_info=True)
+    finally:
+        db.close()
+
+
+async def _handle_message_read(account_id: int, event):
+    chat_id = getattr(event, "chat_id", None)
+    if not chat_id:
+        return
+
+    max_id = getattr(event, "max_id", None)
+    message_ids = list(getattr(event, "message_ids", None) or [])
+    is_inbox = bool(getattr(event, "inbox", False))
+
+    db = SessionLocal()
+    try:
+        conv = db.query(Conversation).filter(
+            Conversation.account_id == account_id,
+            Conversation.tg_user_id == str(chat_id),
+        ).first()
+        if not conv:
+            return
+
+        _apply_read_state(db, conv, max_id=max_id, message_ids=message_ids, inbox=is_inbox)
+        db.commit()
+        if _ws_broadcast:
+            await _ws_broadcast({
+                "event": "message_read_state",
+                "conversation_id": conv.id,
+                "account_id": account_id,
+                "inbox": is_inbox,
+                "max_id": max_id,
+                "message_ids": message_ids,
+            })
+    except Exception as exc:
+        logger.error("Error handling message read state: %s", exc, exc_info=True)
     finally:
         db.close()
 
@@ -1575,6 +1822,10 @@ async def start_client(account: Account, _tdata_retried: bool = False) -> bool:
         @client.on(events.NewMessage())
         async def handler(event):
             await _handle_message(acc_id, event)
+
+        @client.on(events.MessageRead())
+        async def read_handler(event):
+            await _handle_message_read(acc_id, event)
 
         _clients[acc_id] = client
         task = asyncio.create_task(_run_client(client, acc_id))
@@ -1842,6 +2093,7 @@ def _persist_outgoing_outreach_message(
     tg_username: Optional[str] = None,
     tg_first_name: Optional[str] = None,
     tg_last_name: Optional[str] = None,
+    tg_message_id: Optional[int] = None,
 ) -> Optional[Conversation]:
     db = SessionLocal()
     try:
@@ -1861,7 +2113,14 @@ def _persist_outgoing_outreach_message(
                 tg_last_name=tg_last_name,
                 source_campaign_id=source_campaign_id,
             )
-        _record_outreach_message(db, conversation=conv, role="assistant", text=text)
+        _record_outreach_message(
+            db,
+            conversation=conv,
+            role="assistant",
+            text=text,
+            tg_message_id=tg_message_id,
+            is_outgoing=True,
+        )
         db.commit()
         db.refresh(conv)
         return conv
@@ -1880,7 +2139,7 @@ async def send_manual_message(account_id: int, tg_user_id: str, conversation_id:
         return {"ok": False, "error": "Account is not connected"}
     send_text, persisted_text, send_kwargs = _prepare_telegram_outgoing_text(text)
     try:
-        await client.send_message(int(tg_user_id), send_text, **send_kwargs)
+        sent = await client.send_message(int(tg_user_id), send_text, **send_kwargs)
     except ValueError as exc:
         entity = await _resolve_conversation_entity_for_send(client, conversation_id)
         if entity is None:
@@ -1892,13 +2151,14 @@ async def send_manual_message(account_id: int, tg_user_id: str, conversation_id:
                 exc,
             )
             return {"ok": False, "error": str(exc)}
-        await client.send_message(entity, send_text, **send_kwargs)
+        sent = await client.send_message(entity, send_text, **send_kwargs)
     _clear_error(account_id, connection_state="online", last_seen_online_at=_utcnow())
     conv = _persist_outgoing_outreach_message(
         account_id=account_id,
         conversation_id=conversation_id,
         tg_user_id=tg_user_id,
         text=persisted_text,
+        tg_message_id=getattr(sent, "id", None),
     )
     if _ws_broadcast:
         if conv:

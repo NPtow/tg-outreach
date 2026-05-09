@@ -76,6 +76,17 @@ def init_db():
         ("conversations", "source_campaign_id INTEGER"),
         ("conversations", "unread_count INTEGER DEFAULT 0"),
         ("conversations", "is_hot INTEGER DEFAULT 0"),
+        ("conversations", "tg_bio TEXT"),
+        ("conversations", "tg_photo_base64 TEXT"),
+        ("conversations", "tg_photo_mime TEXT"),
+        ("conversations", "tg_profile_updated_at TIMESTAMP"),
+        ("conversations", "outbox_read_max_id INTEGER"),
+        ("conversations", "inbox_read_max_id INTEGER"),
+        # messages
+        ("messages", "tg_message_id INTEGER"),
+        ("messages", "is_outgoing INTEGER DEFAULT 0"),
+        ("messages", "telegram_read_at TIMESTAMP"),
+        ("messages", "telegram_read_by_us_at TIMESTAMP"),
         # contacts
         ("contact_batches", "project_id INTEGER"),
         ("contacts", "project_id INTEGER"),
@@ -126,6 +137,15 @@ def init_db():
                 conn.commit()
             except Exception:
                 conn.rollback()  # PostgreSQL requires rollback after error before next statement
+        try:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_messages_conversation_tg_message "
+                "ON messages(conversation_id, tg_message_id) "
+                "WHERE tg_message_id IS NOT NULL"
+            ))
+            conn.commit()
+        except Exception:
+            conn.rollback()
 
     # For PostgreSQL: convert legacy INTEGER boolean columns to proper BOOLEAN type.
     # Safe to re-run because we first inspect the current column type.
@@ -137,6 +157,7 @@ def init_db():
             ("accounts", "auto_reply"),
             ("accounts", "needs_reauth"),
             ("settings", "auto_reply_enabled"),
+            ("messages", "is_outgoing"),
         ]
         with engine.connect() as conn:
             for table, col in bool_cols:

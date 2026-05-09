@@ -213,6 +213,12 @@ class Conversation(Base):
     tg_username = Column(String(100))
     tg_first_name = Column(String(100))
     tg_last_name = Column(String(100))
+    tg_bio = Column(Text, nullable=True)
+    tg_photo_base64 = Column(Text, nullable=True)
+    tg_photo_mime = Column(String(50), nullable=True)
+    tg_profile_updated_at = Column(DateTime, nullable=True)
+    outbox_read_max_id = Column(Integer, nullable=True)
+    inbox_read_max_id = Column(Integer, nullable=True)
     status = Column(String(20), default="active")  # active | paused | done
     last_message = Column(Text)
     last_message_at = Column(DateTime, default=datetime.utcnow)
@@ -234,6 +240,10 @@ class Message(Base):
     conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
     role = Column(String(10), nullable=False)  # user | assistant
     text = Column(Text, nullable=False)
+    tg_message_id = Column(Integer, nullable=True, index=True)
+    is_outgoing = Column(Boolean, default=False)
+    telegram_read_at = Column(DateTime, nullable=True)
+    telegram_read_by_us_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     conversation = relationship("Conversation", back_populates="messages")

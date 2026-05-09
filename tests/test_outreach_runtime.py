@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -78,13 +78,17 @@ class FakeCreatedTask:
 
 
 class FakeEvent:
-    def __init__(self, *, sender, text, is_out=False):
+    def __init__(self, *, sender, text, is_out=False, message_id=None, chat=None):
         self._sender = sender
         self.is_out = is_out
-        self.message = SimpleNamespace(text=text)
+        self._chat = chat
+        self.message = SimpleNamespace(text=text, id=message_id, out=is_out)
 
     async def get_sender(self):
         return self._sender
+
+    async def get_chat(self):
+        return self._chat
 
 
 class FakeTypingAction:
@@ -202,6 +206,156 @@ class OutreachRuntimeTests(unittest.TestCase):
         self.assertEqual(kwargs["system_version"], "888")
         self.assertEqual(kwargs["app_version"], "999")
         self.assertEqual(kwargs["lang_code"], "111")
+
+    def test_record_outreach_message_dedupes_by_telegram_message_id(self):
+        with self._db() as db:
+            conv = tg._ensure_outreach_conversation(
+                db,
+                account_id=1,
+                tg_user_id="1001",
+                tg_username="lead",
+            )
+            first = tg._record_outreach_message(
+                db,
+                conversation=conv,
+                role="assistant",
+                text="Первое",
+                tg_message_id=555,
+                is_outgoing=True,
+            )
+            second = tg._record_outreach_message(
+                db,
+                conversation=conv,
+                role="assistant",
+                text="Дубль",
+                tg_message_id=555,
+                is_outgoing=True,
+            )
+            db.commit()
+
+            messages = db.query(Message).filter(Message.conversation_id == conv.id).all()
+            self.assertEqual(first.id, second.id)
+            self.assertEqual(len(messages), 1)
+            self.assertEqual(messages[0].text, "Первое")
+
+    def test_outgoing_message_is_assistant_and_not_unread(self):
+        with self._db() as db:
+            conv = tg._ensure_outreach_conversation(
+                db,
+                account_id=1,
+                tg_user_id="1002",
+                tg_username="lead2",
+            )
+            conv.unread_count = 3
+            msg = tg._record_outreach_message(
+                db,
+                conversation=conv,
+                role="assistant",
+                text="Ответ из Nicegram",
+                tg_message_id=777,
+                is_outgoing=True,
+            )
+            conv.unread_count = 0
+            db.commit()
+
+            self.assertEqual(msg.role, "assistant")
+            self.assertTrue(msg.is_outgoing)
+            self.assertEqual(conv.unread_count, 0)
+
+    def test_outgoing_telegram_event_is_persisted_without_auto_reply(self):
+        with self._db() as db:
+            db.add(Conversation(id=101, account_id=7, tg_user_id="1005", tg_username="lead5", unread_count=2))
+            db.commit()
+
+        event = FakeEvent(
+            sender=SimpleNamespace(id=7),
+            text="Ответ из Nicegram",
+            is_out=True,
+            message_id=900,
+            chat=SimpleNamespace(id=1005, username="lead5", first_name="Lead", last_name=""),
+        )
+        with patch("backend.telegram_client.SessionLocal", self.Session):
+            with patch("backend.telegram_client._schedule_auto_reply") as schedule:
+                asyncio.run(tg._handle_message(7, event))
+
+        schedule.assert_not_called()
+        with self._db() as db:
+            conv = db.query(Conversation).filter(Conversation.id == 101).first()
+            messages = db.query(Message).filter(Message.conversation_id == 101).all()
+
+        self.assertEqual(conv.unread_count, 0)
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].role, "assistant")
+        self.assertEqual(messages[0].text, "Ответ из Nicegram")
+        self.assertEqual(messages[0].tg_message_id, 900)
+
+    def test_should_refresh_profile_when_missing_or_old(self):
+        conv = Conversation(account_id=1, tg_user_id="1003")
+        self.assertTrue(tg._should_refresh_profile(conv))
+        conv.tg_profile_updated_at = datetime.utcnow()
+        self.assertFalse(tg._should_refresh_profile(conv))
+        conv.tg_profile_updated_at = datetime.utcnow() - timedelta(days=8)
+        self.assertTrue(tg._should_refresh_profile(conv))
+
+    def test_apply_outbox_read_state_marks_assistant_messages_read(self):
+        with self._db() as db:
+            conv = tg._ensure_outreach_conversation(db, account_id=1, tg_user_id="1004")
+            tg._record_outreach_message(
+                db,
+                conversation=conv,
+                role="assistant",
+                text="one",
+                tg_message_id=10,
+                is_outgoing=True,
+            )
+            tg._record_outreach_message(
+                db,
+                conversation=conv,
+                role="assistant",
+                text="two",
+                tg_message_id=11,
+                is_outgoing=True,
+            )
+            changed = tg._apply_read_state(db, conv, max_id=10, message_ids=[], inbox=False)
+            db.commit()
+
+            messages = db.query(Message).filter(Message.conversation_id == conv.id).order_by(Message.tg_message_id).all()
+            self.assertEqual(changed, 1)
+            self.assertIsNotNone(messages[0].telegram_read_at)
+            self.assertIsNone(messages[1].telegram_read_at)
+
+    def test_apply_inbox_read_state_marks_user_messages_read_by_us(self):
+        with self._db() as db:
+            conv = tg._ensure_outreach_conversation(db, account_id=1, tg_user_id="1006")
+            tg._record_outreach_message(
+                db,
+                conversation=conv,
+                role="user",
+                text="one",
+                tg_message_id=20,
+                is_outgoing=False,
+            )
+            changed = tg._apply_read_state(db, conv, max_id=20, message_ids=[], inbox=True)
+            db.commit()
+
+            message = db.query(Message).filter(Message.conversation_id == conv.id).first()
+            self.assertEqual(changed, 1)
+            self.assertIsNotNone(message.telegram_read_by_us_at)
+
+    def test_message_read_state_serializer(self):
+        outgoing = Message(role="assistant", text="x")
+        self.assertEqual(conversations_router._message_read_state(outgoing), "sent")
+        outgoing.telegram_read_at = datetime.utcnow()
+        self.assertEqual(conversations_router._message_read_state(outgoing), "read")
+
+        incoming = Message(role="user", text="x")
+        self.assertEqual(conversations_router._message_read_state(incoming), "unread")
+        incoming.telegram_read_by_us_at = datetime.utcnow()
+        self.assertEqual(conversations_router._message_read_state(incoming), "read_by_us")
+
+    def test_avatar_data_url_serializer(self):
+        conv = Conversation(account_id=1, tg_user_id="1007", tg_photo_base64="abc", tg_photo_mime="image/jpeg")
+        self.assertEqual(conversations_router._avatar_data_url(conv), "data:image/jpeg;base64,abc")
 
     def test_resolve_prompt_prefers_account_prompt_over_campaign_prompt(self):
         settings = Settings(system_prompt="global prompt")
