@@ -1,9 +1,10 @@
-import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { BrowserRouter, NavLink, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import Accounts from "./pages/Accounts";
 import Campaigns from "./pages/Campaigns";
 import Contacts from "./pages/Contacts";
 import Conversations from "./pages/Conversations";
+import Landing from "./pages/Landing";
 import Prompts from "./pages/Prompts";
 import ProxyPool from "./pages/ProxyPool";
 import Settings from "./pages/Settings";
@@ -213,15 +214,7 @@ function WorkspaceFrame() {
 
           <main className="flex-1">
             <div className="mx-auto w-full max-w-[1600px] px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
-              <Routes>
-                <Route path="/" element={<Conversations />} />
-                <Route path="/accounts" element={<Accounts />} />
-                <Route path="/campaigns" element={<Campaigns />} />
-                <Route path="/contacts" element={<Contacts />} />
-                <Route path="/prompts" element={<Prompts />} />
-                <Route path="/proxies" element={<ProxyPool />} />
-                <Route path="/settings" element={<Settings />} />
-              </Routes>
+              <Outlet />
             </div>
           </main>
         </div>
@@ -233,7 +226,18 @@ function WorkspaceFrame() {
 export default function App() {
   return (
     <BrowserRouter>
-      <WorkspaceFrame />
+      <Routes>
+        <Route path="/landing" element={<Landing />} />
+        <Route element={<WorkspaceFrame />}>
+          <Route path="/" element={<Conversations />} />
+          <Route path="/accounts" element={<Accounts />} />
+          <Route path="/campaigns" element={<Campaigns />} />
+          <Route path="/contacts" element={<Contacts />} />
+          <Route path="/prompts" element={<Prompts />} />
+          <Route path="/proxies" element={<ProxyPool />} />
+          <Route path="/settings" element={<Settings />} />
+        </Route>
+      </Routes>
       <ErrorToast />
     </BrowserRouter>
   );
